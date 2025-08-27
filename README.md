@@ -651,3 +651,27 @@ MIT License
   - `NEWS_CACHE_SIZE` (default 1024)
   - `NEWS_TTL_SECONDS` (default 300)
 
+---
+
+## Demo question ideas
+
+**Single-tool prompts**
+- What is the current stock price of GOOGL?
+- Can you get me the latest quote for TSLA?
+- Show me the company profile for Microsoft (MSFT).
+- Tell me about Apple Inc. (AAPL).
+- Find recent news about NVIDIA (NVDA).
+- Are there any new articles about Amazon (AMZN)?
+
+**Multi-tool prompts**
+- What is the latest stock price for AAPL and can you also give me their company profile?
+- I want to know the current price of TSLA and see the latest news about the company.
+- Give me a full report on Google (GOOGL): price, profile, and recent news.
+- How is NVDA doing? I need the stock price and any news from the past week.
+- Tell me about Amazon's business (AMZN) and find news related to their recent performance.
+
+**Conversational prompts**
+- I'm thinking about investing in tech. Can you give me the latest price and news for both MSFT and GOOGL?
+- My friend told me to look into NVDA. Can you pull up their company profile and the latest stock price for me?
+- Is there anything interesting happening with Tesla (TSLA) lately? Show me their news and current stock value.
+- I heard something on the news about Meta (META). Can you find the relevant articles and also tell me their current stock price?
