@@ -2,7 +2,7 @@
 
 **A modern, AI-powered stock analysis platform combining FastAPI backend with React frontend, featuring conversational AI, real-time market data, and web search capabilities.**
 
-[![Demo Video](https://img.shields.io/badge/📹-Watch%20Demo-red?style=for-the-badge)]([https://youtu.be/J3EujYV7LqE])
+[![Demo Video](https://img.shields.io/badge/📹-Watch%20Demo-red?style=for-the-badge)](https://youtu.be/J3EujYV7LqE)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-green.svg)](https://fastapi.tiangolo.com/)
