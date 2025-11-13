@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Enhanced Error Handling - Demo</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #1a1a1a;
+            color: #fff;
+            line-height: 1.6;
+        }
+        .demo-section {
+            background: #2a2a2a;
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 8px;
+            border: 1px solid #444;
+        }
+        .error-demo {
+            background: rgba(185, 28, 28, 0.1);
+            border: 1px solid #dc2626;
+            padding: 16px;
+            border-radius: 8px;
+            margin: 10px 0;
+        }
+        .network-status {
+            padding: 8px 12px;
+            border-radius: 6px;
+            border: 1px solid;
+            font-size: 12px;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            margin: 10px 0;
+        }
+        .status-offline { background: rgba(127, 29, 29, 0.5); border-color: #dc2626; color: #fca5a5; }
+        .status-poor { background: rgba(146, 64, 14, 0.5); border-color: #d97706; color: #fcd34d; }
+        .status-good { background: rgba(21, 128, 61, 0.5); border-color: #16a34a; color: #86efac; }
+        .retry-button {
+            background: #dc2626;
+            color: white;
+            border: none;
+            padding: 4px 12px;
+            border-radius: 4px;
+            font-size: 12px;
+            cursor: pointer;
+            margin-right: 8px;
+        }
+        .retry-button:hover { background: #b91c1c; }
+        .dismiss-button {
+            background: #374151;
+            color: #d1d5db;
+            border: none;
+            padding: 4px 12px;
+            border-radius: 4px;
+            font-size: 12px;
+            cursor: pointer;
+        }
+        .dismiss-button:hover { background: #4b5563; }
+        .feature-list {
+            list-style: none;
+            padding: 0;
+        }
+        .feature-list li {
+            padding: 8px 0;
+            border-bottom: 1px solid #444;
+        }
+        .feature-list li:before {
+            content: "✅ ";
+            margin-right: 8px;
+        }
+        h1, h2 { color: #60a5fa; }
+        code { 
+            background: #374151; 
+            padding: 2px 6px; 
+            border-radius: 4px; 
+            font-size: 14px; 
+        }
+    </style>
+</head>
+<body>
+    <h1>🌐 Enhanced Error Handling & Network Responsiveness</h1>
+    <p><strong>Status:</strong> <span style="color: #10b981;">✅ IMPLEMENTED</span></p>
+    
+    <div class="demo-section">
+        <h2>🔧 What We've Improved</h2>
+        <ul class="feature-list">
+            <li><strong>User-friendly error messages:</strong> "Failed to fetch" → "🌐 Connection failed - Please check your internet connection"</li>
+            <li><strong>Automatic retry mechanism:</strong> Failed requests retry up to 3 times with exponential backoff</li>
+            <li><strong>Smart error categorization:</strong> Network, timeout, and server errors are handled differently</li>
+            <li><strong>Interactive error UI:</strong> Users can retry failed requests or dismiss errors with one click</li>
+            <li><strong>Real-time network monitoring:</strong> Connection quality is continuously monitored and displayed</li>
+            <li><strong>Actionable error guidance:</strong> Each error type shows specific troubleshooting tips</li>
+        </ul>
+    </div>
+
+    <div class="demo-section">
+        <h2>🎯 Error Message Examples</h2>
+        
+        <div class="error-demo">
+            <div style="color: #fca5a5; margin-bottom: 8px;">🌐 Connection failed - Please check your internet connection and try again</div>
+            <div style="color: #fca5a5; font-size: 12px; margin-bottom: 12px;">
+                💡 Try: Check your internet connection, refresh the page, or contact support if the issue persists.
+            </div>
+            <button class="retry-button">🔄 Retry</button>
+            <button class="dismiss-button">Dismiss</button>
+            <button class="retry-button" style="background: #1d4ed8;">🔄 Refresh Page</button>
+        </div>
+
+        <div class="error-demo">
+            <div style="color: #fca5a5; margin-bottom: 8px;">⏱️ Request timed out - Server may be busy, please try again</div>
+            <div style="color: #fca5a5; font-size: 12px; margin-bottom: 12px;">
+                💡 The server may be experiencing high load. Please wait a moment and try again.
+            </div>
+            <button class="retry-button">🔄 Retry</button>
+            <button class="dismiss-button">Dismiss</button>
+        </div>
+    </div>
+
+    <div class="demo-section">
+        <h2>📡 Network Status Indicators</h2>
+        
+        <div class="network-status status-good">
+            <span>🟢</span>
+            <span style="font-weight: 500;">Connected</span>
+            <span style="opacity: 0.75;">- Connection is stable</span>
+        </div>
+
+        <div class="network-status status-poor">
+            <span>🟡</span>
+            <span style="font-weight: 500;">Slow connection</span>
+            <span style="opacity: 0.75;">- Connection quality is poor, requests may be slower</span>
+        </div>
+
+        <div class="network-status status-offline">
+            <span>🔴</span>
+            <span style="font-weight: 500;">Offline</span>
+            <span style="opacity: 0.75;">- No internet connection detected</span>
+        </div>
+    </div>
+
+    <div class="demo-section">
+        <h2>⚡ Technical Implementation</h2>
+        
+        <h3>Automatic Retry Logic:</h3>
+        <ul>
+            <li><strong>Exponential backoff:</strong> 1s → 2s → 4s delays between retries</li>
+            <li><strong>Smart retry detection:</strong> Only retries network and timeout errors</li>
+            <li><strong>Jitter:</strong> Adds random delay to prevent thundering herd</li>
+            <li><strong>Maximum attempts:</strong> 3 retries for regular requests, 2 for streaming</li>
+        </ul>
+
+        <h3>Network Monitoring:</h3>
+        <ul>
+            <li><strong>Online/offline detection:</strong> Uses browser <code>navigator.onLine</code> API</li>
+            <li><strong>Quality assessment:</strong> Periodic HEAD requests to measure response time</li>
+            <li><strong>Health checks:</strong> Every 30 seconds when online</li>
+            <li><strong>Real-time updates:</strong> Responds to browser network events</li>
+        </ul>
+
+        <h3>Error Categorization:</h3>
+        <ul>
+            <li><strong>Network errors:</strong> <code>TypeError: Failed to fetch</code></li>
+            <li><strong>Timeout errors:</strong> Requests taking >5 seconds</li>
+            <li><strong>Server errors:</strong> HTTP 5xx status codes</li>
+            <li><strong>Authentication:</strong> HTTP 401/403 with automatic token refresh</li>
+        </ul>
+    </div>
+
+    <div class="demo-section">
+        <h2>🎉 User Experience Benefits</h2>
+        <ul class="feature-list">
+            <li><strong>No more cryptic errors:</strong> Users see clear, actionable messages instead of technical jargon</li>
+            <li><strong>Reduced frustration:</strong> Automatic retries handle temporary network hiccups transparently</li>
+            <li><strong>Proactive feedback:</strong> Users know about connection issues before they cause problems</li>
+            <li><strong>Quick recovery:</strong> One-click retry and refresh options get users back on track fast</li>
+            <li><strong>Context-aware help:</strong> Different error types show specific troubleshooting steps</li>
+            <li><strong>Professional appearance:</strong> Polished error handling makes the app feel more reliable</li>
+        </ul>
+    </div>
+
+    <div class="demo-section">
+        <h2>🚀 What's New</h2>
+        <p>The following error messages are now user-friendly and responsive to web connectivity:</p>
+        
+        <div style="background: #374151; padding: 15px; border-radius: 6px; margin: 10px 0;">
+            <div style="color: #ef4444; font-family: monospace; font-size: 14px;">❌ BEFORE:</div>
+            <div style="color: #9ca3af; font-family: monospace; margin: 5px 0;">"TypeError: Failed to fetch"</div>
+            <div style="color: #9ca3af; font-family: monospace; margin: 5px 0;">"NetworkError when attempting to fetch resource"</div>
+            <div style="color: #9ca3af; font-family: monospace; margin: 5px 0;">"500 Internal Server Error"</div>
+        </div>
+
+        <div style="background: #065f46; padding: 15px; border-radius: 6px; margin: 10px 0;">
+            <div style="color: #10b981; font-family: monospace; font-size: 14px;">✅ AFTER:</div>
+            <div style="color: #d1fae5; margin: 5px 0;">"🌐 Connection failed - Please check your internet connection and try again"</div>
+            <div style="color: #d1fae5; margin: 5px 0;">"⏱️ Request timed out - Server may be busy, please try again"</div>
+            <div style="color: #d1fae5; margin: 5px 0;">"⏹️ Request was cancelled"</div>
+        </div>
+    </div>
+
+    <div class="demo-section">
+        <h2>📱 Responsive Features</h2>
+        <ul class="feature-list">
+            <li><strong>Mobile-friendly:</strong> Error messages and buttons work well on touch devices</li>
+            <li><strong>Accessibility:</strong> Screen reader friendly with proper ARIA labels</li>
+            <li><strong>Performance:</strong> Network monitoring doesn't impact app performance</li>
+            <li><strong>Cross-browser:</strong> Works on Chrome, Firefox, Safari, and Edge</li>
+            <li><strong>Offline support:</strong> Graceful handling when internet is unavailable</li>
+        </ul>
+    </div>
+</body>
+</html>

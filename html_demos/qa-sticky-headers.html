@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Q&A Sticky Headers - Perplexity Style</title>
+  <style>
+    /* CSS Custom Properties for theming */
+    :root {
+      --bg-primary: #ffffff;
+      --bg-secondary: #fafafa;
+      --border-color: #e5e7eb;
+      --text-primary: #111827;
+      --text-secondary: #6b7280;
+      --accent-color: #3b82f6;
+      --shadow-light: 0 1px 3px rgba(0, 0, 0, 0.1);
+      --shadow-stuck: 0 2px 8px rgba(0, 0, 0, 0.08);
+      --border-radius: 8px;
+      --spacing-xs: 4px;
+      --spacing-sm: 8px;
+      --spacing-md: 12px;
+      --spacing-lg: 16px;
+      --spacing-xl: 24px;
+    }
+
+    /* Reset and base styles */
+    *, *::before, *::after {
+      box-sizing: border-box;
+    }
+
+    html, body {
+      height: 100%;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      color: var(--text-primary);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      font-size: 16px;
+      line-height: 1.6;
+      background: var(--bg-secondary);
+    }
+
+    /* App shell - semantic main container */
+    .qa-app {
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      background: var(--bg-secondary);
+    }
+
+    /* Header for the entire app */
+    .app-header {
+      background: var(--bg-primary);
+      border-bottom: 1px solid var(--border-color);
+      padding: var(--spacing-lg);
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      box-shadow: var(--shadow-light);
+    }
+
+    .app-title {
+      margin: 0;
+      font-size: 24px;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .app-subtitle {
+      margin: var(--spacing-xs) 0 0 0;
+      color: var(--text-secondary);
+      font-size: 14px;
+    }
+
+    /* 
+    CRITICAL: Scroll container that bounds sticky behavior
+    - Must have defined height (100vh minus header)
+    - Must have overflow: auto to create scrolling context
+    - This is the ancestor that sticky headers stick to
+    */
+    .qa-scroll {
+      flex: 1;
+      height: calc(100vh - 120px); /* Adjust based on header height */
+      overflow: auto;
+      overscroll-behavior: contain; /* Prevents scroll chaining */
+      background: var(--bg-secondary);
+      display: flex;
+      flex-direction: column;
+      gap: var(--spacing-xl);
+      padding: var(--spacing-lg);
+    }
+
+    /* 
+    Individual Q&A section
+    - Semantic <section> for each question/answer pair
+    - Contains sticky header and body content
+    */
+    .qa {
+      background: var(--bg-primary);
+      border: 1px solid var(--border-color);
+      border-radius: var(--border-radius);
+      overflow: clip; /* Keeps shadows and borders clean */
+      box-shadow: var(--shadow-light);
+      transition: box-shadow 0.2s ease;
+    }
+
+    .qa:hover {
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+    }
+
+    /* 
+    STICKY HEADER - The magic happens here
+    - position: sticky makes it stick within qa-scroll container
+    - top: 0 means it sticks to the top edge
+    - z-index: 2 ensures it's above body content
+    - Solid background prevents bleed-through
+    */
+    .qa__head {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      background: var(--bg-primary);
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: center;
+      gap: var(--spacing-md);
+      padding: var(--spacing-md) var(--spacing-lg);
+      border-bottom: 1px solid var(--border-color);
+      transition: box-shadow 0.2s ease, backdrop-filter 0.2s ease, background 0.2s ease;
+    }
+
+    /* 
+    Enhanced visual when header is stuck (pinned)
+    - Applied via JavaScript intersection observer
+    - Subtle shadow and backdrop blur for depth
+    */
+    .qa__head.is-stuck {
+      box-shadow: var(--shadow-stuck);
+      backdrop-filter: saturate(120%) blur(2px);
+      background: rgba(255, 255, 255, 0.95);
+      border-bottom-color: rgba(229, 231, 235, 0.8);
+    }
+
+    /* Question title styling */
+    .qa__title {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 600;
+      line-height: 1.3;
+      color: var(--text-primary);
+    }
+
+    /* Toolbar placeholder for actions */
+    .qa__tools {
+      display: flex;
+      gap: var(--spacing-sm);
+      align-items: center;
+    }
+
+    .qa__tool-btn {
+      background: transparent;
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      padding: 6px 8px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .qa__tool-btn:hover {
+      background: var(--bg-secondary);
+      border-color: var(--accent-color);
+      color: var(--accent-color);
+    }
+
+    /* Answer body content */
+    .qa__body {
+      padding: var(--spacing-lg);
+      display: grid;
+      gap: var(--spacing-md);
+      line-height: 1.7;
+    }
+
+    .qa__body p {
+      margin: 0;
+      color: var(--text-primary);
+    }
+
+    .qa__body p + p {
+      margin-top: var(--spacing-md);
+    }
+
+    /* Code blocks and highlights */
+    .qa__body code {
+      background: var(--bg-secondary);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', Consolas, monospace;
+      font-size: 14px;
+    }
+
+    .qa__body blockquote {
+      margin: 0;
+      padding-left: var(--spacing-lg);
+      border-left: 3px solid var(--accent-color);
+      color: var(--text-secondary);
+      font-style: italic;
+    }
+
+    /* 
+    RESPONSIVE DESIGN - Mobile optimizations
+    - Reduce padding and gaps on smaller screens
+    - Keep headers compact to preserve content area
+    */
+    @media (max-width: 640px) {
+      .qa-scroll {
+        padding: var(--spacing-sm);
+        gap: var(--spacing-lg);
+      }
+      
+      .qa {
+        border-radius: 6px;
+      }
+      
+      .qa__head {
+        padding: var(--spacing-sm) var(--spacing-md);
+        gap: var(--spacing-sm);
+      }
+      
+      .qa__title {
+        font-size: 16px;
+      }
+      
+      .qa__body {
+        padding: var(--spacing-md);
+      }
+
+      .qa__tool-btn {
+        padding: 4px 6px;
+        font-size: 11px;
+      }
+    }
+
+    /* 
+    ACCESSIBILITY - Focus states and keyboard navigation
+    - High contrast focus outlines
+    - Sufficient color contrast ratios
+    - Proper focus management
+    */
+    .qa__head :where(button, a):focus-visible {
+      outline: 2px solid var(--accent-color);
+      outline-offset: 2px;
+      border-radius: 4px;
+    }
+
+    /* Skip to content link for screen readers */
+    .skip-link {
+      position: absolute;
+      top: -40px;
+      left: 6px;
+      background: var(--accent-color);
+      color: white;
+      padding: 8px;
+      text-decoration: none;
+      border-radius: 4px;
+      z-index: 100;
+    }
+
+    .skip-link:focus {
+      top: 6px;
+    }
+
+    /* Loading state for demo */
+    .loading {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: var(--spacing-xl);
+      color: var(--text-secondary);
+    }
+
+    /* Smooth scrolling for better UX */
+    html {
+      scroll-behavior: smooth;
+    }
+
+    /* Dark mode support (optional enhancement) */
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg-primary: #1f2937;
+        --bg-secondary: #111827;
+        --border-color: #374151;
+        --text-primary: #f9fafb;
+        --text-secondary: #9ca3af;
+        --accent-color: #60a5fa;
+      }
+    }
+  </style>
+</head>
+<body>
+  <!-- Skip link for accessibility -->
+  <a href="#main-content" class="skip-link">Skip to main content</a>
+  
+  <!-- Main application container -->
+  <main class="qa-app">
+    <!-- Application header -->
+    <header class="app-header">
+      <h1 class="app-title">Q&A Thread View</h1>
+      <p class="app-subtitle">Sticky headers demo - similar to Perplexity's interface</p>
+    </header>
+
+    <!-- 
+    SCROLL CONTAINER - Critical for sticky behavior
+    This creates the scrolling context that sticky headers stick to
+    -->
+    <div class="qa-scroll" role="region" aria-label="Questions and answers list" id="main-content">
+      
+      <!-- Q&A Section 1 -->
+      <section class="qa" aria-labelledby="q1">
+        <header class="qa__head">
+          <h2 class="qa__title" id="q1">How do sticky headers work in CSS?</h2>
+          <div class="qa__tools" aria-hidden="true">
+            <button class="qa__tool-btn" type="button" title="Copy link">🔗</button>
+            <button class="qa__tool-btn" type="button" title="Share">↗</button>
+            <button class="qa__tool-btn" type="button" title="More options">⋯</button>
+          </div>
+        </header>
+        <div class="qa__body">
+          <p>Sticky positioning is a hybrid of relative and fixed positioning. The element is treated as relatively positioned until it crosses a specified threshold, at which point it is treated as fixed positioned.</p>
+          <p>The key requirements are:</p>
+          <blockquote>The sticky element must have a defined offset (top, right, bottom, or left)</blockquote>
+          <p>There must be a scrollable ancestor container. The sticky element will stick within the bounds of its closest scrollable ancestor, not the entire viewport.</p>
+          <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur.</p>
+        </div>
+      </section>
+
+      <!-- Q&A Section 2 -->
+      <section class="qa" aria-labelledby="q2">
+        <header class="qa__head">
+          <h2 class="qa__title" id="q2">What are common pitfalls with sticky positioning?</h2>
+          <div class="qa__tools" aria-hidden="true">
+            <button class="qa__tool-btn" type="button" title="Copy link">🔗</button>
+            <button class="qa__tool-btn" type="button" title="Share">↗</button>
+            <button class="qa__tool-btn" type="button" title="More options">⋯</button>
+          </div>
+        </header>
+        <div class="qa__body">
+          <p>The most common issues developers face with sticky positioning include:</p>
+          <p><strong>1. Ancestor overflow settings:</strong> If any parent element has <code>overflow: hidden</code>, <code>overflow: scroll</code>, or <code>overflow: auto</code>, it can interfere with sticky behavior.</p>
+          <p><strong>2. Missing offset values:</strong> You must specify at least one offset property (top, right, bottom, left) for sticky to work.</p>
+          <p><strong>3. Transform/filter ancestors:</strong> Elements with CSS transforms or filters create new stacking contexts that can break sticky positioning.</p>
+          <p>Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum. Sed ut perspiciatis unde omnis iste natus error sit voluptatem accusantium doloremque laudantium.</p>
+        </div>
+      </section>
+
+      <!-- Q&A Section 3 -->
+      <section class="qa" aria-labelledby="q3">
+        <header class="qa__head">
+          <h2 class="qa__title" id="q3">How do you implement the "stuck" visual state?</h2>
+          <div class="qa__tools" aria-hidden="true">
+            <button class="qa__tool-btn" type="button" title="Copy link">🔗</button>
+            <button class="qa__tool-btn" type="button" title="Share">↗</button>
+            <button class="qa__tool-btn" type="button" title="More options">⋯</button>
+          </div>
+        </header>
+        <div class="qa__body">
+          <p>To detect when a sticky header is actually "stuck" (pinned to the top), we use the Intersection Observer API. This allows us to add visual enhancements like shadows or background changes.</p>
+          <p>The observer watches for changes in the intersection ratio. When the header is partially obscured (intersection ratio < 1) and positioned at the top of the container, we know it's stuck.</p>
+          <p>Nemo enim ipsam voluptatem quia voluptas sit aspernatur aut odit aut fugit, sed quia consequuntur magni dolores eos qui ratione voluptatem sequi nesciunt. Neque porro quisquam est, qui dolorem ipsum quia dolor sit amet, consectetur, adipisci velit.</p>
+          <p>At vero eos et accusamus et iusto odio dignissimos ducimus qui blanditiis praesentium voluptatum deleniti atque corrupti quos dolores et quas molestias excepturi sint occaecati cupiditate non provident.</p>
+        </div>
+      </section>
+
+      <!-- Q&A Section 4 -->
+      <section class="qa" aria-labelledby="q4">
+        <header class="qa__head">
+          <h2 class="qa__title" id="q4">What about responsive design considerations?</h2>
+          <div class="qa__tools" aria-hidden="true">
+            <button class="qa__tool-btn" type="button" title="Copy link">🔗</button>
+            <button class="qa__tool-btn" type="button" title="Share">↗</button>
+            <button class="qa__tool-btn" type="button" title="More options">⋯</button>
+          </div>
+        </header>
+        <div class="qa__body">
+          <p>Responsive sticky headers require careful consideration of mobile viewports and touch interactions:</p>
+          <p><strong>Viewport height:</strong> Use <code>100vh</code> carefully on mobile devices due to browser UI changes. Consider <code>100dvh</code> for dynamic viewport height.</p>
+          <p><strong>Touch scrolling:</strong> Add <code>overscroll-behavior: contain</code> to prevent scroll chaining on mobile devices.</p>
+          <p><strong>Header sizing:</strong> Keep sticky headers compact on small screens to preserve content area. Consider collapsible or abbreviated versions.</p>
+          <p>Similique sunt in culpa qui officia deserunt mollitia animi, id est laborum et dolorum fuga. Et harum quidem rerum facilis est et expedita distinctio nam libero tempore, cum soluta nobis est eligendi optio cumque nihil impedit quo minus.</p>
+        </div>
+      </section>
+
+      <!-- Q&A Section 5 -->
+      <section class="qa" aria-labelledby="q5">
+        <header class="qa__head">
+          <h2 class="qa__title" id="q5">How does this compare to Perplexity's implementation?</h2>
+          <div class="qa__tools" aria-hidden="true">
+            <button class="qa__tool-btn" type="button" title="Copy link">🔗</button>
+            <button class="qa__tool-btn" type="button" title="Share">↗</button>
+            <button class="qa__tool-btn" type="button" title="More options">⋯</button>
+          </div>
+        </header>
+        <div class="qa__body">
+          <p>This implementation follows Perplexity's design patterns with several key features:</p>
+          <p><strong>Semantic structure:</strong> Each question-answer pair is a proper <code>&lt;section&gt;</code> with header and body regions for accessibility.</p>
+          <p><strong>Visual hierarchy:</strong> Clear typography scaling and consistent spacing create a clean reading experience.</p>
+          <p><strong>Interactive elements:</strong> Toolbar buttons for sharing, copying, and additional actions are positioned for easy access.</p>
+          <p>Temporibus autem quibusdam et aut officiis debitis aut rerum necessitatibus saepe eveniet ut et voluptates repudiandae sint et molestiae non recusandae. Itaque earum rerum hic tenetur a sapiente delectus.</p>
+        </div>
+      </section>
+
+      <!-- Q&A Section 6 -->
+      <section class="qa" aria-labelledby="q6">
+        <header class="qa__head">
+          <h2 class="qa__title" id="q6">What accessibility features are included?</h2>
+          <div class="qa__tools" aria-hidden="true">
+            <button class="qa__tool-btn" type="button" title="Copy link">🔗</button>
+            <button class="qa__tool-btn" type="button" title="Share">↗</button>
+            <button class="qa__tool-btn" type="button" title="More options">⋯</button>
+          </div>
+        </header>
+        <div class="qa__body">
+          <p>This implementation includes comprehensive accessibility features:</p>
+          <p><strong>Semantic HTML:</strong> Proper use of <code>&lt;main&gt;</code>, <code>&lt;section&gt;</code>, <code>&lt;header&gt;</code>, and heading hierarchy.</p>
+          <p><strong>ARIA labels:</strong> Screen reader users get clear context about the content structure and purpose.</p>
+          <p><strong>Focus management:</strong> Visible focus indicators and proper tab order for keyboard navigation.</p>
+          <p><strong>Skip links:</strong> Users can bypass repetitive content and jump directly to main content.</p>
+          <p>Ut aut reiciendis voluptatibus maiores alias consequatur aut perferendis doloribus asperiores repellat. Nam libero tempore, cum soluta nobis est eligendi optio cumque nihil impedit quo minus id quod maxime placeat.</p>
+        </div>
+      </section>
+
+      <!-- Q&A Section 7 -->
+      <section class="qa" aria-labelledby="q7">
+        <header class="qa__head">
+          <h2 class="qa__title" id="q7">How do you handle performance with many sections?</h2>
+          <div class="qa__tools" aria-hidden="true">
+            <button class="qa__tool-btn" type="button" title="Copy link">🔗</button>
+            <button class="qa__tool-btn" type="button" title="Share">↗</button>
+            <button class="qa__tool-btn" type="button" title="More options">⋯</button>
+          </div>
+        </header>
+        <div class="qa__body">
+          <p>For optimal performance with many Q&A sections, consider these strategies:</p>
+          <p><strong>Intersection Observer:</strong> Use a single observer instance for all headers rather than individual observers to minimize overhead.</p>
+          <p><strong>Virtual scrolling:</strong> For hundreds of sections, implement virtual scrolling to render only visible content.</p>
+          <p><strong>CSS containment:</strong> Use <code>contain: layout style</code> on sections to isolate rendering work.</p>
+          <p>Facere possimus, omnis voluptas assumenda est, omnis dolor repellendus. Temporibus autem quibusdam et aut officiis debitis aut rerum necessitatibus saepe eveniet ut et voluptates repudiandae sint et molestiae non recusandae.</p>
+        </div>
+      </section>
+
+      <!-- Q&A Section 8 -->
+      <section class="qa" aria-labelledby="q8">
+        <header class="qa__head">
+          <h2 class="qa__title" id="q8">What about browser compatibility?</h2>
+          <div class="qa__tools" aria-hidden="true">
+            <button class="qa__tool-btn" type="button" title="Copy link">🔗</button>
+            <button class="qa__tool-btn" type="button" title="Share">↗</button>
+            <button class="qa__tool-btn" type="button" title="More options">⋯</button>
+          </div>
+        </header>
+        <div class="qa__body">
+          <p>Sticky positioning has excellent modern browser support:</p>
+          <p><strong>Desktop browsers:</strong> Chrome 56+, Firefox 32+, Safari 13+, Edge 16+</p>
+          <p><strong>Mobile browsers:</strong> iOS Safari 13+, Chrome Mobile 56+, Samsung Internet 6.2+</p>
+          <p><strong>Fallback strategy:</strong> For older browsers, the headers will behave as normal static elements, which provides graceful degradation.</p>
+          <p>Et harum quidem rerum facilis est et expedita distinctio. Nam libero tempore, cum soluta nobis est eligendi optio cumque nihil impedit quo minus id quod maxime placeat facere possimus, omnis voluptas assumenda est.</p>
+        </div>
+      </section>
+
+      <!-- Q&A Section 9 -->
+      <section class="qa" aria-labelledby="q9">
+        <header class="qa__head">
+          <h2 class="qa__title" id="q9">Can this pattern be extended for complex layouts?</h2>
+          <div class="qa__tools" aria-hidden="true">
+            <button class="qa__tool-btn" type="button" title="Copy link">🔗</button>
+            <button class="qa__tool-btn" type="button" title="Share">↗</button>
+            <button class="qa__tool-btn" type="button" title="More options">⋯</button>
+          </div>
+        </header>
+        <div class="qa__body">
+          <p>This sticky header pattern works well in complex layouts with some considerations:</p>
+          <p><strong>CSS Grid integration:</strong> The scroll container can be a grid item, maintaining layout relationships with sidebars or navigation.</p>
+          <p><strong>Flex layouts:</strong> Works seamlessly within flexbox containers, just ensure the scroll container has a defined height.</p>
+          <p><strong>Nested scrolling:</strong> Avoid nested scroll containers as they can interfere with sticky behavior.</p>
+          <p>Sed ut perspiciatis unde omnis iste natus error sit voluptatem accusantium doloremque laudantium, totam rem aperiam, eaque ipsa quae ab illo inventore veritatis et quasi architecto beatae vitae dicta sunt explicabo.</p>
+        </div>
+      </section>
+
+      <!-- Q&A Section 10 -->
+      <section class="qa" aria-labelledby="q10">
+        <header class="qa__head">
+          <h2 class="qa__title" id="q10">What are the next steps for implementation?</h2>
+          <div class="qa__tools" aria-hidden="true">
+            <button class="qa__tool-btn" type="button" title="Copy link">🔗</button>
+            <button class="qa__tool-btn" type="button" title="Share">↗</button>
+            <button class="qa__tool-btn" type="button" title="More options">⋯</button>
+          </div>
+        </header>
+        <div class="qa__body">
+          <p>To integrate this pattern into your application:</p>
+          <p><strong>Framework adaptation:</strong> Convert the HTML structure to your framework's component system (React, Vue, Angular, etc.)</p>
+          <p><strong>Data integration:</strong> Connect the sections to your question/answer data source with proper loading states.</p>
+          <p><strong>Enhanced interactions:</strong> Add features like collapsible sections, deep linking, search highlighting, and real-time updates.</p>
+          <p><strong>Testing:</strong> Verify sticky behavior across different devices and browsers, especially on mobile Safari.</p>
+          <p>Nemo enim ipsam voluptatem quia voluptas sit aspernatur aut odit aut fugit, sed quia consequuntur magni dolores eos qui ratione voluptatem sequi nesciunt. Neque porro quisquam est, qui dolorem ipsum quia dolor sit amet.</p>
+        </div>
+      </section>
+
+    </div> <!-- End qa-scroll -->
+  </main> <!-- End qa-app -->
+
+  <!-- 
+  JAVASCRIPT - Intersection Observer for "stuck" state detection
+  This adds visual enhancements when headers are pinned
+  -->
+  <script>
+    /*
+    STICKY STATE DETECTION
+    Uses Intersection Observer to detect when headers are "stuck" (pinned)
+    and adds visual enhancements like shadows and backdrop blur
+    */
+    
+    // Select all sticky headers
+    const headers = document.querySelectorAll('.qa__head');
+    
+    // Create intersection observer with threshold at 1 (fully visible)
+    const intersectionObserver = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          // Header is "stuck" when:
+          // 1. It's positioned at or above the top of the container
+          // 2. It's not fully visible (intersection ratio < 1)
+          const isAtTop = entry.boundingClientRect.top <= 0;
+          const isNotFullyVisible = entry.intersectionRatio < 1;
+          const isStuck = isAtTop && isNotFullyVisible;
+          
+          // Toggle the visual "stuck" class
+          entry.target.classList.toggle('is-stuck', isStuck);
+        });
+      },
+      {
+        // Watch for when element becomes partially hidden
+        threshold: [1],
+        // Optional: add root margin for earlier detection
+        rootMargin: '0px 0px -1px 0px'
+      }
+    );
+    
+    // Observe all headers
+    headers.forEach(header => {
+      intersectionObserver.observe(header);
+    });
+
+    /*
+    SMOOTH SCROLLING ENHANCEMENT
+    Add smooth scrolling to toolbar buttons for better UX
+    */
+    document.addEventListener('click', (event) => {
+      const button = event.target.closest('.qa__tool-btn');
+      if (!button) return;
+      
+      // Get button title to determine action
+      const action = button.getAttribute('title');
+      
+      // Simple action handlers for demo
+      switch (true) {
+        case action?.includes('Copy'):
+          // Copy section link to clipboard
+          const section = button.closest('.qa');
+          const heading = section.querySelector('.qa__title');
+          const text = `${heading.textContent} - ${window.location.href}#${heading.id}`;
+          navigator.clipboard?.writeText(text);
+          button.textContent = '✓';
+          setTimeout(() => button.textContent = '🔗', 1000);
+          break;
+          
+        case action?.includes('Share'):
+          // Native share API if available
+          if (navigator.share) {
+            const section = button.closest('.qa');
+            const heading = section.querySelector('.qa__title');
+            navigator.share({
+              title: heading.textContent,
+              url: `${window.location.href}#${heading.id}`
+            });
+          }
+          break;
+          
+        case action?.includes('More'):
+          // Toggle additional options (demo only)
+          console.log('More options clicked for:', button.closest('.qa').querySelector('.qa__title').textContent);
+          break;
+      }
+    });
+
+    /*
+    KEYBOARD NAVIGATION ENHANCEMENT
+    Add keyboard shortcuts for better accessibility
+    */
+    document.addEventListener('keydown', (event) => {
+      // Jump to next/previous section with j/k keys (vim-style)
+      if (event.key === 'j' && !event.ctrlKey && !event.metaKey) {
+        const current = document.querySelector('.qa__head.is-stuck');
+        if (current) {
+          const next = current.closest('.qa').nextElementSibling;
+          if (next) {
+            next.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            event.preventDefault();
+          }
+        }
+      } else if (event.key === 'k' && !event.ctrlKey && !event.metaKey) {
+        const current = document.querySelector('.qa__head.is-stuck');
+        if (current) {
+          const prev = current.closest('.qa').previousElementSibling;
+          if (prev) {
+            prev.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            event.preventDefault();
+          }
+        }
+      }
+    });
+
+    /*
+    PERFORMANCE MONITORING (optional)
+    Log performance metrics for optimization
+    */
+    if ('PerformanceObserver' in window) {
+      const observer = new PerformanceObserver((list) => {
+        list.getEntries().forEach((entry) => {
+          if (entry.entryType === 'measure') {
+            console.log(`${entry.name}: ${entry.duration}ms`);
+          }
+        });
+      });
+      observer.observe({ entryTypes: ['measure'] });
+    }
+  </script>
+</body>
+</html>
