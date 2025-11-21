@@ -1,0 +1,21 @@
+{
+  "symbol": "AAPL",
+  "trained_date": "2025-11-18T11:47:08.992044",
+  "period": "2y",
+  "features": [
+    "return"
+  ],
+  "lookback_days": 60,
+  "train_samples": 351,
+  "test_samples": 88,
+  "train_loss": 0.009134729392826557,
+  "val_loss": 0.0038976334035396576,
+  "train_mae": 0.06849193572998047,
+  "val_mae": 0.043352171778678894,
+  "train_mae_return": 0.012586706915722626,
+  "val_mae_return": 0.010880526183343252,
+  "train_rmse_return": 0.019337220774912175,
+  "val_rmse_return": 0.015294356142852638,
+  "train_mape_pct": 39155.835957055184,
+  "val_mape_pct": 179.55170239689133
+}

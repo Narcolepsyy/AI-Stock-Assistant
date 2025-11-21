@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
-from openai import AzureOpenAI
+from openai import AsyncAzureOpenAI
 
 from app.models.database import get_db, User, Log
 from app.models.schemas import ChatRequest, ChatResponse, ChatHistoryResponse, ChatMessage
@@ -32,6 +32,25 @@ from app.utils.query_optimizer import (
     is_simple_query, get_fast_model_recommendation, should_skip_rag_and_web_search
 )
 from app.utils.tool_usage_logger import log_tool_usage
+from app.services.chat.utils import (
+    is_raw_tool_call_output, smart_truncate_answer, sanitize_perplexity_result,
+    select_top_sources_for_context, build_web_search_tool_payload,
+    normalize_content_piece, safe_tool_result_json,
+    TRUNC_MAX_CHARS, WEB_SEARCH_METADATA_KEYS
+)
+from app.services.chat.tools import (
+    extract_pseudo_tool_calls, extract_suggested_tool_calls,
+    normalize_tool_name_and_args, PSEUDO_TOOL_RE,
+    MAX_SUGGESTED_TOOL_ROUNDS, SUGGESTED_TOOL_WHITELIST,
+    strip_pseudo_tool_markup
+)
+from app.services.chat.formatting import (
+    human_preview_company_profile, human_preview_quote,
+    human_preview_company_profile_jp, human_preview_quote_jp,
+    human_preview_historical_jp, build_news_summary,
+    human_preview_from_summary, human_preview_historical,
+    human_preview_nikkei_news_jp
+)
 
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -53,7 +72,7 @@ _PRECOMPILED_RESPONSES = {
 }
 
 # --- Smart truncation helpers for synthesized answers (Perplexity-style) ---
-_TRUNC_MAX_CHARS = 1500  # Target max visible chars for synthesized answers in tool payloads
+# TRUNC_MAX_CHARS moved to app.services.chat.utils
 
 _WEB_SEARCH_TOOL_NAMES = {
     "perplexity_search",
@@ -64,221 +83,9 @@ _WEB_SEARCH_TOOL_NAMES = {
     "augmented_rag_web",
 }
 
-_WEB_SEARCH_METADATA_KEYS = ("confidence", "method", "timings", "search_time", "latency_ms")
+# _WEB_SEARCH_METADATA_KEYS moved to app.services.chat.utils
 
-_PARTIAL_CITATION_RE = re.compile(r"\[[0-9]{0,3}$")  # Trailing partial like '[1' or '['
-_ORPHAN_NUM_RE = re.compile(r"(?<!\])(?:(?<=\s)|^)[0-9]{1,2}$")  # Trailing small number not closed by ]
-_BROKEN_CITATION_FRAGMENT_RE = re.compile(r"\[[0-9]{1,3}\s+[^\]]*$")  # e.g. '[1 Some partial'
-
-# Pattern to detect raw JSON tool call outputs from GPT-5 (filter these out)
-_RAW_TOOL_CALL_JSON_RE = re.compile(
-    r'\{\s*"query"\s*:\s*"[^"]*",\s*"max_results"\s*:\s*\d+,\s*"synthesize_answer"\s*:\s*true,\s*"include_recent"\s*:\s*true\s*\}',
-    re.IGNORECASE | re.DOTALL
-)
-
-def _is_raw_tool_call_output(text: str) -> bool:
-    """
-    Detect if text contains raw JSON tool call output that should be hidden from user.
-    GPT-5 sometimes outputs raw JSON instead of using proper function calling API.
-    """
-    if not text or len(text.strip()) < 10:
-        return False
-    
-    # Check for JSON tool call patterns
-    if _RAW_TOOL_CALL_JSON_RE.search(text):
-        return True
-    
-    # Check for multiple JSON objects in succession (tool call spam)
-    json_brace_count = text.count('{')
-    if json_brace_count >= 3 and '"query"' in text and '"max_results"' in text:
-        return True
-    
-    return False
-
-def _smart_truncate_answer(answer: str, max_chars: int = _TRUNC_MAX_CHARS) -> str:
-    """Truncate synthesized answer safely, avoiding broken citation/artifacts.
-    Rules:
-    - Cut at max_chars boundary (soft) and roll back to last whitespace if mid-word
-    - Remove dangling partial citation patterns (e.g. '[1', '[12')
-    - Remove orphan trailing numbers (e.g. solitary '0' left after slice)
-    - Preserve existing full citations like '[12]'
-    - Append ellipsis if truncated
-    """
-    if not answer or len(answer) <= max_chars:
-        return answer
-
-    cut = answer[:max_chars]
-
-    # If we cut in the middle of a word and we have sufficient earlier whitespace, roll back
-    if not cut.endswith((" ", "\n", "\t")):
-        last_space = cut.rfind(" ")
-        if last_space > max_chars * 0.6:  # Only roll back if it preserves most content
-            cut = cut[:last_space]
-
-    # Remove trailing partial citation like '[1' or '['
-    cut = _PARTIAL_CITATION_RE.sub("", cut)
-
-    # Remove broken citation fragments missing closing bracket
-    cut = _BROKEN_CITATION_FRAGMENT_RE.sub("", cut)
-
-    # Remove trailing orphan number (e.g., stray '0') that is not part of [n]
-    if _ORPHAN_NUM_RE.search(cut.rstrip()):
-        cut = _ORPHAN_NUM_RE.sub("", cut.rstrip())
-
-    # Clean dangling punctuation / unmatched opening brackets
-    cut = cut.rstrip(" ,;:\n\t-[")
-
-    return cut + "..."
-
-def _sanitize_perplexity_result(result: Any) -> Any:
-    """Apply smart truncation & cleanup to perplexity_search tool result structure.
-    Ensures no stray '0' or partial citation artifacts remain after truncation.
-    """
-    try:
-        if not isinstance(result, dict):
-            return result
-        answer = result.get("answer")
-        if isinstance(answer, str) and answer:
-            truncated = _smart_truncate_answer(answer, _TRUNC_MAX_CHARS)
-            # Remove any '[0]' citations (model sometimes enumerates from zero) – shift discouraged
-            truncated = truncated.replace("[0]", "")
-            # Remove lingering broken citation fragments inside (conservative: only if near end)
-            tail = truncated[-120:]
-            cleaned_tail = _BROKEN_CITATION_FRAGMENT_RE.sub("", tail)
-            if tail != cleaned_tail:
-                truncated = truncated[:-120] + cleaned_tail
-            result = {**result, "answer": truncated}
-        return result
-    except Exception:
-        return result
-
-
-def _select_top_sources_for_context(result: Dict[str, Any], limit: int = 3) -> List[Dict[str, Any]]:
-    """Extract a compact list of sources for model context while preserving citation ids."""
-    candidates: List[Dict[str, Any]] = []
-    for key in ("sources", "raw_sources", "results"):
-        value = result.get(key)
-        if isinstance(value, list):
-            candidates.extend(item for item in value if isinstance(item, dict))
-
-    selected: List[Dict[str, Any]] = []
-    seen: set[str] = set()
-
-    for item in candidates:
-        citation_id = item.get("citation_id") or item.get("citationId") or item.get("id")
-        url = item.get("url") or item.get("link") or item.get("source")
-        title = item.get("title") or item.get("name")
-        dedupe_key = str(citation_id).strip() if citation_id is not None else (url or title)
-        if not dedupe_key:
-            continue
-        if dedupe_key in seen:
-            continue
-        seen.add(dedupe_key)
-
-        summary = {
-            "citation_id": citation_id,
-            "title": title,
-            "url": url,
-        }
-
-        snippet = item.get("snippet") or item.get("description") or item.get("content") or item.get("text")
-        if snippet:
-            summary["snippet"] = snippet
-
-        domain = item.get("domain")
-        if not domain and isinstance(url, str):
-            try:
-                parsed = urlparse(url if re.match(r"^https?://", url, re.IGNORECASE) else f"https://{url}")
-                domain = parsed.hostname or parsed.path.split("/")[0]
-                if domain and domain.startswith("www."):
-                    domain = domain[4:]
-            except Exception:
-                domain = None
-        if domain:
-            summary["domain"] = domain
-
-        publish_date = (
-            item.get("publish_date")
-            or item.get("publishDate")
-            or item.get("timestamp")
-            or item.get("date")
-        )
-        if publish_date:
-            summary["publish_date"] = publish_date
-
-        score = item.get("score") or item.get("relevance_score")
-        if score is not None:
-            summary["score"] = score
-
-        selected.append(summary)
-        if len(selected) >= limit:
-            break
-
-    return selected
-
-
-def _build_web_search_tool_payload(result: Dict[str, Any]) -> Dict[str, Any]:
-    """Create a compact payload for web search tools that preserves inline citations."""
-    payload: Dict[str, Any] = {}
-
-    answer = result.get("answer")
-    if isinstance(answer, str) and answer:
-        payload["answer"] = _smart_truncate_answer(answer, _TRUNC_MAX_CHARS)
-
-    citations = result.get("citations")
-    if isinstance(citations, dict) and citations:
-        payload["citations"] = citations
-
-    # Preserve citation styling if available
-    for key in ("css", "styles", "style_tag"):
-        value = result.get(key)
-        if value:
-            payload[key] = value
-            break
-
-    metadata = {}
-    for key in _WEB_SEARCH_METADATA_KEYS:
-        value = result.get(key)
-        if value is not None:
-            metadata[key] = value
-    synthesized_query = result.get("synthesized_query") or result.get("query")
-    if synthesized_query:
-        metadata["query"] = synthesized_query
-    if metadata:
-        payload["metadata"] = metadata
-
-    sources = _select_top_sources_for_context(result)
-    if sources:
-        payload["top_sources"] = sources
-
-    return payload
-
-def _normalize_content_piece(piece: Any) -> str:
-    """Extract text from various content shapes safely."""
-    try:
-        if piece is None:
-            return ""
-        if isinstance(piece, str):
-            return piece
-        # Content piece could be dict-like {type: 'text', 'text': '...'}
-        if isinstance(piece, dict):
-            txt = piece.get("text") or piece.get("content") or ""
-            return txt if isinstance(txt, str) else json.dumps(piece)[:2000]
-        # Fallback stringify
-        return str(piece)
-    except Exception:
-        return ""
-
-
-def _safe_tool_result_json(payload: Any) -> str:
-    """Serialize tool payloads without raising on non-JSON types."""
-    try:
-        return json.dumps(payload, default=str)
-    except Exception:
-        try:
-            return json.dumps(str(payload))
-        except Exception:
-            return "\"\""
+# Regex patterns moved to app.services.chat.utils and app.services.chat.tools
 
 # --- Pseudo tool-call compatibility (e.g., OSS models emitting special markup) ---
 _PSEUDO_TOOL_RE = re.compile(
@@ -311,537 +118,7 @@ _QUOTED_QUERY_RE = re.compile(r"[\"'“”『「](.*?)[\"'“”』」]")
 MAX_SUGGESTED_TOOL_ROUNDS = 2
 
 
-def _normalize_tool_name_and_args(name: str, args_dict: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
-    mapped_name = _TOOL_NAME_MAPPING.get(name, name)
-    args = dict(args_dict or {})
 
-    if "ticker" in args and "symbol" not in args:
-        args["symbol"] = args.pop("ticker")
-
-    if mapped_name in {"web_search", "perplexity_search"}:
-        if "max_results" not in args:
-            for alt_key in ("top_k", "top_n", "num_results", "limit"):
-                if alt_key in args:
-                    try:
-                        args["max_results"] = int(args.pop(alt_key))
-                    except (TypeError, ValueError):
-                        args.pop(alt_key, None)
-                    break
-
-        if "recency_days" in args and "include_recent" not in args:
-            recency_days = args.pop("recency_days")
-            try:
-                args["include_recent"] = int(recency_days) <= 7
-            except (TypeError, ValueError):
-                args["include_recent"] = True
-
-        if "source" in args:
-            source = args.pop("source")
-            if source == "news":
-                args["include_recent"] = True
-                args["synthesize_answer"] = True
-            elif source == "academic":
-                args["include_recent"] = False
-                args["synthesize_answer"] = True
-
-    return mapped_name, args
-
-
-def _safe_literal_eval_node(node: ast.AST) -> Optional[Any]:
-    if isinstance(node, ast.Constant):
-        return node.value
-    if isinstance(node, ast.Str):
-        return node.s
-    if isinstance(node, ast.Num):  # pragma: no cover - legacy AST nodes
-        return node.n
-    if isinstance(node, ast.NameConstant):  # pragma: no cover - legacy AST nodes
-        return node.value
-    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
-        operand = _safe_literal_eval_node(node.operand)
-        if operand is None:
-            return None
-        return operand if isinstance(node.op, ast.UAdd) else -operand
-    if isinstance(node, ast.List):
-        items: List[Any] = []
-        for elt in node.elts:
-            value = _safe_literal_eval_node(elt)
-            if value is None:
-                return None
-            items.append(value)
-        return items
-    if isinstance(node, ast.Tuple):
-        items: List[Any] = []
-        for elt in node.elts:
-            value = _safe_literal_eval_node(elt)
-            if value is None:
-                return None
-            items.append(value)
-        return tuple(items)
-    if isinstance(node, ast.Dict):
-        result: Dict[Any, Any] = {}
-        for key_node, value_node in zip(node.keys, node.values):
-            key = _safe_literal_eval_node(key_node)
-            value = _safe_literal_eval_node(value_node)
-            if key is None or value is None:
-                return None
-            result[key] = value
-        return result
-    return None
-
-
-def _parse_suggested_tool_call(expr: str) -> Optional[Tuple[str, Dict[str, Any]]]:
-    try:
-        tree = ast.parse(expr.strip(), mode="eval")
-    except SyntaxError:
-        return None
-
-    call = getattr(tree, "body", None)
-    if not isinstance(call, ast.Call):
-        return None
-
-    func = call.func
-    if isinstance(func, ast.Attribute):
-        func_name = func.attr
-    elif isinstance(func, ast.Name):
-        func_name = func.id
-    else:
-        return None
-
-    func_name = func_name.strip()
-    if func_name not in _SUGGESTED_TOOL_WHITELIST:
-        return None
-
-    args_dict: Dict[str, Any] = {}
-
-    if call.args:
-        first_value = _safe_literal_eval_node(call.args[0])
-        if first_value is not None:
-            if func_name in {"perplexity_search", "web_search", "augmented_rag_search", "rag_search"}:
-                args_dict.setdefault("query", first_value)
-            elif func_name.startswith("get_") and isinstance(first_value, str):
-                args_dict.setdefault("symbol", first_value)
-
-    for kw in call.keywords or []:
-        if not kw.arg:
-            continue
-        value = _safe_literal_eval_node(kw.value)
-        if value is None:
-            continue
-        args_dict[kw.arg] = value
-
-    mapped_name, normalized_args = _normalize_tool_name_and_args(func_name, args_dict)
-    return mapped_name, normalized_args
-
-
-def _extract_suggested_tool_calls(text: str, max_calls: int = 2) -> List[Dict[str, Any]]:
-    if not text:
-        return []
-
-    candidates: List[str] = []
-
-    for block_match in _CODE_BLOCK_RE.finditer(text):
-        block = block_match.group(1)
-        if not block:
-            continue
-        lines = [line.strip() for line in block.strip().splitlines() if line.strip()]
-        if not lines:
-            continue
-        # Skip language specifiers (e.g., ```python)
-        if len(lines) > 1 and re.match(r"^[A-Za-z][\w+-]*$", lines[0]) and "(" not in lines[0]:
-            lines = lines[1:]
-        for line in lines:
-            candidates.append(line)
-
-    for inline_match in _INLINE_CODE_RE.finditer(text):
-        snippet = inline_match.group(1).strip()
-        if snippet:
-            candidates.append(snippet)
-
-    for call_match in _SUGGESTED_CALL_RE.finditer(text):
-        candidate = call_match.group(1).strip()
-        if candidate:
-            candidates.append(candidate)
-
-    suggestions: List[Dict[str, Any]] = []
-    seen: Set[Tuple[str, str]] = set()
-    counter = 0
-
-    for candidate in candidates:
-        if not any(name in candidate for name in _SUGGESTED_TOOL_WHITELIST):
-            continue
-        parsed = _parse_suggested_tool_call(candidate)
-        if not parsed:
-            continue
-        mapped_name, normalized_args = parsed
-        try:
-            args_json = json.dumps(normalized_args)
-        except Exception:
-            continue
-        key = (mapped_name, args_json)
-        if key in seen:
-            continue
-        seen.add(key)
-        counter += 1
-        suggestions.append({
-            "id": f"suggested-{counter}",
-            "type": "function",
-            "function": {"name": mapped_name, "arguments": args_json},
-        })
-        if len(suggestions) >= max_calls:
-            break
-
-    if len(suggestions) < max_calls:
-        text_lower = text.lower()
-        if "perplexity_search" in text_lower:
-            quoted_queries: List[str] = []
-            for match in _QUOTED_QUERY_RE.findall(text):
-                query = match.strip()
-                if not query:
-                    continue
-                query = " ".join(part.strip() for part in query.splitlines() if part.strip())
-                if len(query) < 3:
-                    continue
-                quoted_queries.append(query)
-
-            if not quoted_queries:
-                bullet_re = re.compile(r"^[\-\u2022\u30FB\u2219]\s*(.+)$")
-                for line in text.splitlines():
-                    line_stripped = line.strip()
-                    if not line_stripped:
-                        continue
-                    bullet_match = bullet_re.match(line_stripped)
-                    if bullet_match:
-                        candidate_query = bullet_match.group(1).strip()
-                        candidate_query = candidate_query.strip("\"'“”『』「」")
-                        if len(candidate_query) >= 3:
-                            quoted_queries.append(candidate_query)
-
-            for query in quoted_queries:
-                try:
-                    normalized_query = query.strip()
-                    if not normalized_query:
-                        continue
-                    mapped_name, normalized_args = _normalize_tool_name_and_args(
-                        "perplexity_search",
-                        {
-                            "query": normalized_query,
-                            "synthesize_answer": True,
-                            "include_recent": True,
-                        },
-                    )
-                    args_json = json.dumps(normalized_args)
-                    key = (mapped_name, args_json)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    counter += 1
-                    suggestions.append({
-                        "id": f"suggested-{counter}",
-                        "type": "function",
-                        "function": {"name": mapped_name, "arguments": args_json},
-                    })
-                    if len(suggestions) >= max_calls:
-                        break
-                except Exception:
-                    continue
-
-    return suggestions
-
-# Human-readable previews for common tool results (module-level for reuse)
-def _human_preview_company_profile(result: Dict[str, Any]) -> str:
-    try:
-        sym = (result.get("symbol") or "").upper()
-        name = result.get("longName") or ""
-        sector = result.get("sector") or ""
-        industry = result.get("industry") or ""
-        country = result.get("country") or ""
-        currency = result.get("currency") or ""
-        website = result.get("website") or ""
-        parts = []
-        title = f"Company profile for {sym}: {name}".strip()
-        parts.append(title)
-        si = ", ".join([p for p in [sector, industry] if p])
-        if si:
-            parts.append(si)
-        if country:
-            parts.append(country)
-        if currency:
-            parts.append(f"Currency: {currency}")
-        if website:
-            parts.append(website)
-        return "\n".join(parts)
-    except Exception:
-        try:
-            s = json.dumps(result)
-            return (s[:280] + ("..." if len(s) > 280 else ""))
-        except Exception:
-            return ""
-
-def _human_preview_quote(result: Dict[str, Any]) -> str:
-    try:
-        sym = (result.get("symbol") or "").upper()
-        price = result.get("price")
-        currency = result.get("currency") or ""
-        as_of = result.get("as_of") or ""
-        if price is not None:
-            return f"{sym} latest close: {price} {currency} (as of {as_of})"
-        return ""
-    except Exception:
-        try:
-            s = json.dumps(result)
-            return (s[:280] + ("..." if len(s) > 280 else ""))
-        except Exception:
-            return ""
-
-# Japanese versions of preview functions
-def _human_preview_company_profile_jp(result: Dict[str, Any]) -> str:
-    try:
-        sym = (result.get("symbol") or "").upper()
-        name = result.get("longName") or ""
-        sector = result.get("sector") or ""
-        industry = result.get("industry") or ""
-        country = result.get("country") or ""
-        currency = result.get("currency") or ""
-        
-        parts = []
-        if sym and name:
-            parts.append(f"**{sym} - {name}**")
-        if sector or industry:
-            sector_info = f"{sector}" + (f" / {industry}" if industry else "")
-            parts.append(f"業種: {sector_info}")
-        if country:
-            parts.append(f"国: {country}")
-        if currency:
-            parts.append(f"通貨: {currency}")
-        
-        formatted = "\n".join(parts)
-        
-        # Add data source
-        formatted += "\n\n**データ出典**: Yahoo Finance 企業情報"
-        
-        return formatted
-    except Exception:
-        return _human_preview_company_profile(result)
-
-def _human_preview_quote_jp(result: Dict[str, Any]) -> str:
-    try:
-        sym = (result.get("symbol") or "").upper()
-        price = result.get("price")
-        currency = result.get("currency") or ""
-        as_of = result.get("as_of") or ""
-        
-        if price is not None:
-            if currency == "JPY":
-                formatted = f"**{sym}**: {price:,.0f}円"
-            else:
-                formatted = f"**{sym}**: {price:,.2f} {currency}"
-        else:
-            formatted = f"**{sym}**: データなし"
-        
-        if as_of:
-            formatted += f"\n取得時刻: {as_of}"
-        
-        return formatted
-    except Exception:
-        return _human_preview_quote(result)
-
-def _human_preview_historical_jp(result: Dict[str, Any]) -> str:
-    try:
-        sym = (result.get("symbol") or "").upper()
-        currency = result.get("currency") or ""
-        count = result.get("count", 0)
-        period = result.get("period", "")
-        rows = result.get("rows", [])
-        
-        if not rows:
-            return f"{sym} 過去データ：データなし"
-        
-        # Get latest row for trend info
-        latest = rows[-1] if rows else {}
-        if len(rows) > 1:
-            prev = rows[-2]
-            current_price = latest.get("close")
-            prev_price = prev.get("close")
-            
-            if current_price and prev_price:
-                change = current_price - prev_price
-                change_pct = (change / prev_price) * 100
-                trend = "上昇" if change > 0 else "下落" if change < 0 else "横ばい"
-                currency_jp = {"JPY": "円", "USD": "ドル", "EUR": "ユーロ"}.get(currency, currency)
-                
-                return f"**{sym} 過去{period}データ：**\n最新終値 {current_price:,} {currency_jp} (前日比 {change:+.1f} {currency_jp}, {change_pct:+.2f}%, {trend})"
-        
-        return f"**{sym} 過去{period}データ** ({count}件のデータポイント)"
-    except Exception:
-        try:
-            return f"{result.get('symbol', '')} historical data: {result.get('count', 0)} points"
-        except Exception:
-            return ""
-
-def _build_news_summary(result: Dict[str, Any]) -> Dict[str, Any]:
-    """Create a concise summary for augmented news results suitable for model consumption."""
-    sym = (result.get("symbol") or "").upper()
-    items = result.get("items") or []
-    headlines: List[Dict[str, Any]] = []
-    for it in items[:5]:
-        try:
-            t = (it.get("title") or "").strip()
-            pub = (it.get("publisher") or "").strip() or None
-            dt = (it.get("published_at") or "").strip() or None
-            link = (it.get("link") or "").strip() or None
-            content = (it.get("content") or "").strip()
-            if len(t) > 160:
-                t = t[:160] + "..."
-            if content and len(content) > 280:
-                content = content[:280] + "..."
-            headlines.append({
-                "title": t,
-                "publisher": pub,
-                "published_at": dt,
-                "summary": content or None,
-                "link": link,
-            })
-        except Exception:
-            continue
-    return {
-        "symbol": sym,
-        "count": len(items),
-        "headlines": headlines,
-        "note": "summarized for brevity from get_augmented_news"
-    }
-
-def _human_preview_from_summary(summary: Dict[str, Any]) -> str:
-    """Create human preview from news summary."""
-    sym = summary.get("symbol") or ""
-    lines = [f"Top headlines for {sym}:"]
-    for h in summary.get("headlines", [])[:3]:
-        bits = [h.get("title") or "Untitled"]
-        if h.get("publisher"):
-            bits.append(f"({h['publisher']}")
-            if h.get("published_at"):
-                bits[-1] = bits[-1][:-1] + f", {h['published_at'][:10]})"
-        elif h.get("published_at"):
-            bits.append(f"({h['published_at'][:10]})")
-        lines.append(" - " + " ".join(bits))
-    return "\n".join(lines)
-
-def _human_preview_historical(result: Dict[str, Any]) -> str:
-    try:
-        sym = (result.get("symbol") or "").upper()
-        currency = result.get("currency") or ""
-        count = result.get("count", 0)
-        period = result.get("period", "")
-        rows = result.get("rows", [])
-        
-        if not rows:
-            return f"{sym} historical data: No data"
-        
-        # Get latest row for trend info
-        latest = rows[-1] if rows else {}
-        if len(rows) > 1:
-            prev = rows[-2]
-            current_price = latest.get("close")
-            prev_price = prev.get("close")
-            
-            if current_price and prev_price:
-                change = current_price - prev_price
-                change_pct = (change / prev_price) * 100
-                trend = "up" if change > 0 else "down" if change < 0 else "flat"
-                
-                return f"{sym} {period} data: Latest {current_price} {currency} ({change:+.1f} {currency}, {change_pct:+.2f}%, {trend})"
-        
-        return f"{sym} {period} data ({count} points)"
-    except Exception:
-        try:
-            return f"{result.get('symbol', '')} historical data: {result.get('count', 0)} points"
-        except Exception:
-            return ""
-
-def _human_preview_nikkei_news_jp(result: Dict[str, Any]) -> str:
-    try:
-        count = result.get("count", 0)
-        summaries = result.get("summaries", [])
-        error = result.get("error")
-        
-        if error:
-            return f"日経平均ニュース：{error}"
-        
-        if not summaries:
-            return "日経平均ニュース：該当するニュースがありませんでした"
-        
-        lines = ["**日経平均の直近ニュース：**"]
-        for i, item in enumerate(summaries[:5], 1):
-            sentiment = item.get("sentiment_jp", "ニュートラル")
-            summary = item.get("summary", "")
-            publisher = item.get("publisher", "")
-            
-            # Format: number. summary (sentiment) - publisher
-            line = f"{i}. {summary}"
-            if sentiment:
-                line += f" ({sentiment})"
-            if publisher:
-                line += f" - {publisher}"
-            lines.append(line)
-        
-        return "\n".join(lines)
-    except Exception:
-        try:
-            return f"日経平均ニュース：{result.get('count', 0)}件"
-        except Exception:
-            return "日経平均ニュース取得完了"
-
-def _extract_pseudo_tool_calls(text: str) -> List[Dict[str, Any]]:
-    """Parse pseudo tool calls embedded in assistant text into standard tool_call format."""
-    calls: List[Dict[str, Any]] = []
-    if not text:
-        return calls
-    try:
-        matches = list(_PSEUDO_TOOL_RE.finditer(text))
-        counter = 0
-        for m in matches:
-            # Extract tool name from group 1 and JSON payload from group 2
-            tool_name = m.group(1)
-            raw_json = m.group(2)
-            
-            try:
-                payload = json.loads(raw_json)
-            except Exception:
-                continue
-            
-            # Use tool name from regex match or fallback to payload
-            name = tool_name or payload.get("tool") or payload.get("name")
-            if not name:
-                continue
-            
-            # Build args, remapping common parameter variations
-            args_dict = {
-                k: v for k, v in payload.items() if k not in ("tool", "name") and v is not None
-            }
-
-            mapped_name, normalized_args = _normalize_tool_name_and_args(name, args_dict)
-            
-            try:
-                args_json = json.dumps(normalized_args)
-            except Exception:
-                args_json = "{}"
-            counter += 1
-            calls.append({
-                "id": f"pseudo-{counter}",
-                "type": "function",
-                "function": {"name": mapped_name, "arguments": args_json}
-            })
-    except Exception:
-        return []
-    return calls
-
-def _strip_pseudo_tool_markup(text: str) -> str:
-    """Remove pseudo tool-call markup blocks from assistant text for clean display."""
-    if not text:
-        return text
-    try:
-        return _PSEUDO_TOOL_RE.sub("", text)
-    except Exception:
-        return text
 
 def _convert_latex_format(text: str) -> str:
     r"""Normalize LaTeX math delimiters to `\(`, `\)`, `\[`, and `\]` as required by frontend rendering."""
@@ -1091,7 +368,7 @@ async def chat_stream_endpoint(
                     
                     # Special handling: summarize augmented news to keep context small 
                     if name == "get_augmented_news" and isinstance(result, dict):
-                        summary = _build_news_summary(result)
+                        summary = build_news_summary(result)
                         result = {**summary}
                     # Truncate large generic tool results to control costs
                     elif isinstance(result, dict) and "items" in result and name != "get_augmented_news":
@@ -1103,7 +380,7 @@ async def chat_stream_endpoint(
 
                 # Apply perplexity_search specific sanitation
                 if name == "perplexity_search" and isinstance(result, dict):
-                    result = _sanitize_perplexity_result(result)
+                    result = sanitize_perplexity_result(result)
 
                 return tool_call_id, result, None
             except Exception as e:
@@ -1158,14 +435,14 @@ async def chat_stream_endpoint(
                         
                         # Truncate tool result content for token management, preserving web search citations
                         if name in _WEB_SEARCH_TOOL_NAMES and isinstance(result, dict):
-                            payload = _build_web_search_tool_payload(result)
-                            result_str = _safe_tool_result_json(payload)
+                            payload = build_web_search_tool_payload(result)
+                            result_str = safe_tool_result_json(payload)
                             if estimate_tokens(result_str) > 768:
                                 compact_payload = dict(payload)
                                 compact_payload.pop("top_sources", None)
-                                result_str = _safe_tool_result_json(compact_payload)
+                                result_str = safe_tool_result_json(compact_payload)
                         else:
-                            result_str = _safe_tool_result_json(result)
+                            result_str = safe_tool_result_json(result)
                             if estimate_tokens(result_str) > 512:
                                 result_str = result_str[:2000] + "... [truncated]"
 
@@ -1240,7 +517,7 @@ async def chat_stream_endpoint(
                         "timeout": model_timeout,
                     }
                     _apply_token_limit(completion_params, max_tokens)
-                    if not isinstance(client, AzureOpenAI):
+                    if not isinstance(client, AsyncAzureOpenAI):
                         # Optimize OpenAI streaming performance; Azure does not support stream_options
                         completion_params["stream_options"] = {"include_usage": False}
                     
@@ -1248,7 +525,7 @@ async def chat_stream_endpoint(
                     if not model_metadata.get("temperature_fixed"):
                         completion_params["temperature"] = temperature
                     
-                    stream = client.chat.completions.create(**completion_params)
+                    stream = await client.chat.completions.create(**completion_params)
                 except Exception as api_error:
                     logger.error(f"Failed to create streaming completion with {model_name}: {api_error}")
                     # Fallback to non-streaming once
@@ -1269,13 +546,13 @@ async def chat_stream_endpoint(
                         if not model_metadata.get("temperature_fixed"):
                             fallback_params["temperature"] = _resolve_temperature()
                         
-                        completion = client.chat.completions.create(**fallback_params)
+                        completion = await client.chat.completions.create(**fallback_params)
                         choice = (completion.choices or [None])[0]
                         msg = getattr(choice, "message", None)
                         content = getattr(msg, "content", "") if msg else ""
                         # Normalize content if it's a structured payload
                         if isinstance(content, list):
-                            content = "".join(_normalize_content_piece(p) for p in content)
+                            content = "".join(normalize_content_piece(p) for p in content)
                         content = content or ""
                         if content:
                             full_content += content
@@ -1313,10 +590,10 @@ async def chat_stream_endpoint(
                         if hasattr(delta, 'content') and delta.content:
                             if isinstance(delta.content, list):
                                 # Join any textual pieces
-                                piece_text = "".join(_normalize_content_piece(p) for p in delta.content)
+                                piece_text = "".join(normalize_content_piece(p) for p in delta.content)
                                 if piece_text:
                                     # Skip raw tool call JSON outputs from GPT-5
-                                    if _is_raw_tool_call_output(piece_text):
+                                    if is_raw_tool_call_output(piece_text):
                                         logger.debug(f"Filtered out raw tool call JSON from {model_name}")
                                         continue
                                     
@@ -1329,7 +606,7 @@ async def chat_stream_endpoint(
                                     yield f"data: {_PRECOMPILED_RESPONSES['content'](converted_text)}\n\n"
                             elif isinstance(delta.content, str):
                                 # Skip raw tool call JSON outputs from GPT-5
-                                if _is_raw_tool_call_output(delta.content):
+                                if is_raw_tool_call_output(delta.content):
                                     logger.debug(f"Filtered out raw tool call JSON from {model_name}")
                                     continue
                                 
@@ -1410,10 +687,10 @@ async def chat_stream_endpoint(
                 else:
                     # Pseudo tool call fallback: parse assistant content for OSS-style tool markup
                     if assistant_msg.get("content"):
-                        pseudo_calls = _extract_pseudo_tool_calls(assistant_msg["content"]) or []
+                        pseudo_calls = extract_pseudo_tool_calls(assistant_msg["content"]) or []
                         if pseudo_calls:
                             # Strip markup from content for display
-                            assistant_msg["content"] = _strip_pseudo_tool_markup(assistant_msg["content"]) or ""
+                            assistant_msg["content"] = strip_pseudo_tool_markup(assistant_msg["content"]) or ""
                             messages.append(assistant_msg)
                             yield f"data: {json.dumps({'type': 'content', 'delta': assistant_msg['content']})}\n\n"
 
@@ -1424,7 +701,7 @@ async def chat_stream_endpoint(
                             # Continue loop to allow the model to use tool results
                             continue
 
-                        suggested_calls = _extract_suggested_tool_calls(assistant_msg["content"]) or []
+                        suggested_calls = extract_suggested_tool_calls(assistant_msg["content"]) or []
                         if suggested_calls:
                             if suggested_tool_rounds >= MAX_SUGGESTED_TOOL_ROUNDS:
                                 logger.info(
@@ -1470,12 +747,12 @@ async def chat_stream_endpoint(
                             if not model_metadata.get("temperature_fixed"):
                                 no_stream_params["temperature"] = _resolve_temperature()
                                 
-                            completion = client.chat.completions.create(**no_stream_params)
+                            completion = await client.chat.completions.create(**no_stream_params)
                             choice = (completion.choices or [None])[0]
                             msg = getattr(choice, "message", None)
                             content = getattr(msg, "content", "") if msg else ""
                             if isinstance(content, list):
-                                content = "".join(_normalize_content_piece(p) for p in content)
+                                content = "".join(normalize_content_piece(p) for p in content)
                             content = content or ""
                             if content:
                                 converted_content = _convert_latex_format(content)
@@ -1516,12 +793,12 @@ async def chat_stream_endpoint(
                 if not model_metadata.get("temperature_fixed"):
                     ai_retry_params["temperature"] = _resolve_temperature()
                     
-                completion = client.chat.completions.create(**ai_retry_params)
+                completion = await client.chat.completions.create(**ai_retry_params)
                 choice = (completion.choices or [None])[0]
                 msg = getattr(choice, "message", None)
                 content = getattr(msg, "content", "") if msg else ""
                 if isinstance(content, list):
-                    content = "".join(_normalize_content_piece(p) for p in content)
+                    content = "".join(normalize_content_piece(p) for p in content)
                 
                 if content and content.strip():
                     converted_content = _convert_latex_format(content)
@@ -1557,19 +834,19 @@ async def chat_stream_endpoint(
                     
                     if name == "get_company_profile" and isinstance(res, dict):
                         if is_japanese:
-                            fallback_parts.append(_human_preview_company_profile_jp(res))
+                            fallback_parts.append(human_preview_company_profile_jp(res))
                         else:
-                            fallback_parts.append(_human_preview_company_profile(res))
+                            fallback_parts.append(human_preview_company_profile(res))
                     elif name == "get_stock_quote" and isinstance(res, dict):
                         if is_japanese:
-                            fallback_parts.append(_human_preview_quote_jp(res))
+                            fallback_parts.append(human_preview_quote_jp(res))
                         else:
-                            fallback_parts.append(_human_preview_quote(res))
+                            fallback_parts.append(human_preview_quote(res))
                     elif name == "get_historical_prices" and isinstance(res, dict):
                         if is_japanese:
-                            fallback_parts.append(_human_preview_historical_jp(res))
+                            fallback_parts.append(human_preview_historical_jp(res))
                         else:
-                            fallback_parts.append(_human_preview_historical(res))
+                            fallback_parts.append(human_preview_historical(res))
                 
                 # Combine all parts or use generic fallback
                 if fallback_parts:
@@ -1578,7 +855,7 @@ async def chat_stream_endpoint(
                     # Generic JSON fallback for unhandled tools
                     try:
                         last = tool_call_results[-1] if tool_call_results else None
-                        fallback = _safe_tool_result_json(last.get("result"))[:400] + "..."  # soft limit
+                        fallback = safe_tool_result_json(last.get("result"))[:400] + "..."  # soft limit
                     except Exception:
                         fallback = "(tool result received)"
                 
@@ -1915,7 +1192,7 @@ async def chat_endpoint(
             if not model_metadata.get("temperature_fixed"):
                 completion_params["temperature"] = resolve_temperature()
                 
-            completion = client.chat.completions.create(**completion_params)
+            completion = await client.chat.completions.create(**completion_params)
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"OpenAI error: {e}")
 
@@ -2049,7 +1326,7 @@ async def chat_endpoint(
             if not model_metadata.get("temperature_fixed"):
                 final_retry_params["temperature"] = resolve_temperature()
                 
-            completion = client.chat.completions.create(**final_retry_params)
+            completion = await client.chat.completions.create(**final_retry_params)
             choice = (completion.choices or [None])[0]
             msg = getattr(choice, "message", None)
             content = getattr(msg, "content", "") if msg else ""

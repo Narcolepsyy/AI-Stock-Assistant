@@ -1,7 +1,7 @@
 """OpenAI/Azure OpenAI client service with enhanced model selection and performance optimizations."""
 import logging
 from typing import Optional, Any, Dict
-from openai import AzureOpenAI, OpenAI
+from openai import AsyncAzureOpenAI, AsyncOpenAI
 from app.core.config import (
     AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_VERSION,
     OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL_DEFAULT,
@@ -11,16 +11,16 @@ from app.core.config import (
 
 logger = logging.getLogger(__name__)
 
-# Global client state with improved connection pooling
-_azure_client: Optional[AzureOpenAI] = None
-_openai_client: Optional[OpenAI] = None
+# Global async client state with improved connection pooling
+_async_azure_client: Optional[AsyncAzureOpenAI] = None
+_async_openai_client: Optional[AsyncOpenAI] = None
 
-def get_azure_client() -> Optional[AzureOpenAI]:
-    """Get Azure OpenAI client if configured with optimized settings."""
-    global _azure_client
-    if _azure_client is None and AZURE_OPENAI_API_KEY and AZURE_OPENAI_ENDPOINT:
+def get_azure_client() -> Optional[AsyncAzureOpenAI]:
+    """Get Async Azure OpenAI client if configured with optimized settings."""
+    global _async_azure_client
+    if _async_azure_client is None and AZURE_OPENAI_API_KEY and AZURE_OPENAI_ENDPOINT:
         try:
-            _azure_client = AzureOpenAI(
+            _async_azure_client = AsyncAzureOpenAI(
                 api_key=AZURE_OPENAI_API_KEY,
                 api_version=AZURE_OPENAI_API_VERSION,
                 azure_endpoint=_normalize_azure_endpoint(AZURE_OPENAI_ENDPOINT),
@@ -31,19 +31,19 @@ def get_azure_client() -> Optional[AzureOpenAI]:
                     "User-Agent": "Azure-OpenAI-Stock-Tool/1.0",
                     "Connection": "keep-alive"  # Connection pooling
                 },
-                # Connection pooling settings
-                http_client=None  # Use default httpx client with connection pooling
+                # Connection pooling settings - httpx async client handles this automatically
+                http_client=None  # Use default httpx async client with connection pooling
             )
-            logger.info("Azure OpenAI client initialized with optimizations at %s", _normalize_azure_endpoint(AZURE_OPENAI_ENDPOINT))
+            logger.info("Async Azure OpenAI client initialized with optimizations at %s", _normalize_azure_endpoint(AZURE_OPENAI_ENDPOINT))
         except Exception as e:
-            logger.error("Failed to initialize Azure OpenAI client: %s", e)
-            _azure_client = None
-    return _azure_client
+            logger.error("Failed to initialize Async Azure OpenAI client: %s", e)
+            _async_azure_client = None
+    return _async_azure_client
 
-def get_openai_client() -> Optional[OpenAI]:
-    """Get standard OpenAI client if configured with optimized settings."""
-    global _openai_client
-    if _openai_client is None and OPENAI_API_KEY:
+def get_openai_client() -> Optional[AsyncOpenAI]:
+    """Get Async standard OpenAI client if configured with optimized settings."""
+    global _async_openai_client
+    if _async_openai_client is None and OPENAI_API_KEY:
         try:
             kwargs = {
                 "api_key": OPENAI_API_KEY,
@@ -56,12 +56,12 @@ def get_openai_client() -> Optional[OpenAI]:
             }
             if (OPENAI_BASE_URL or "").strip():
                 kwargs["base_url"] = OPENAI_BASE_URL.strip()
-            _openai_client = OpenAI(**kwargs)
-            logger.info("OpenAI client initialized with optimizations")
+            _async_openai_client = AsyncOpenAI(**kwargs)
+            logger.info("Async OpenAI client initialized with optimizations")
         except Exception as e:
-            logger.error("Failed to initialize OpenAI client: %s", e)
-            _openai_client = None
-    return _openai_client
+            logger.error("Failed to initialize Async OpenAI client: %s", e)
+            _async_openai_client = None
+    return _async_openai_client
 
 def get_client_for_model(model_key: str, timeout: Optional[int] = None) -> tuple[Any, str, Dict[str, Any]]:
     """Get the appropriate client and resolved model/deployment name with config for a given model key."""

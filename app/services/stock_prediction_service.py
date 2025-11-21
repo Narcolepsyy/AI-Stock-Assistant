@@ -8,11 +8,10 @@ Optimized for GTX 1650 Ti Mobile (4GB VRAM):
 """
 
 import logging
-import os
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, Tuple, Optional
 from pathlib import Path
 import json
 
@@ -33,76 +32,132 @@ MODEL_CONFIG = {
     "prediction_days": 7,  # Predict next 7 days
     "batch_size": 32,
     "epochs": 50,
-    "features": ["close", "volume", "high", "low", "sma_5", "sma_20", "rsi_14"],
+    "features": ["return"],  # Model operates on daily returns instead of raw prices
 }
 
 
-def _calculate_technical_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Calculate technical indicators as features for the model."""
-    df = df.copy()
-    
-    # Simple Moving Averages
-    df["sma_5"] = df["close"].rolling(window=5).mean()
-    df["sma_20"] = df["close"].rolling(window=20).mean()
-    
-    # RSI (Relative Strength Index)
-    delta = df["close"].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / loss
-    df["rsi_14"] = 100 - (100 / (1 + rs))
-    
-    # Fill NaN values (using bfill() and ffill() instead of deprecated method parameter)
-    df = df.bfill().ffill()
-    
-    return df
+def _scale_sequences_with_scaler(seqs: np.ndarray, scaler: object) -> np.ndarray:
+    """Scale 3D sequences of returns using a fitted scaler."""
+    original_shape = seqs.shape
+    scaled = scaler.transform(seqs.reshape(-1, original_shape[-1]))
+    return scaled.reshape(original_shape)
+
+
+def _compute_return_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
+    """Return MAE/RMSE/MAPE metrics for daily returns (in percentage terms)."""
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
+    mae = float(np.mean(np.abs(y_true - y_pred)))
+    rmse = float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
+    base = np.where(y_true == 0, 1e-8, y_true)
+    mape = float(np.mean(np.abs((y_true - y_pred) / base)) * 100)
+    return {
+        "mae": mae,
+        "rmse": rmse,
+        "mape_pct": mape,
+    }
+
+
+def _compute_directional_accuracy(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    neutral_tolerance: float = 0.001
+) -> Dict[str, Any]:
+    """Score the model's ability to predict up/down moves with a deadband for noise.
+
+    Args:
+        y_true: Actual daily returns.
+        y_pred: Predicted daily returns (same scale as y_true).
+        neutral_tolerance: Threshold under which returns are treated as flat.
+
+    Returns:
+        Dictionary with directional accuracy, precision/recall, and basic hit counts.
+    """
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
+
+    def classify_direction(values: np.ndarray) -> np.ndarray:
+        dirs = np.zeros_like(values, dtype=int)
+        dirs[values > neutral_tolerance] = 1
+        dirs[values < -neutral_tolerance] = -1
+        return dirs
+
+    actual_dir = classify_direction(y_true)
+    pred_dir = classify_direction(y_pred)
+
+    effective_mask = actual_dir != 0
+    neutral_mask = actual_dir == 0
+    pred_neutral_mask = pred_dir == 0
+    up_mask = actual_dir == 1
+    down_mask = actual_dir == -1
+    pred_up_mask = pred_dir == 1
+    pred_down_mask = pred_dir == -1
+
+    def safe_ratio(num: int, denom: int) -> Optional[float]:
+        return float(num / denom) if denom else None
+
+    directional_hits = int(np.sum((pred_dir == actual_dir) & effective_mask))
+    neutral_hits = int(np.sum(pred_neutral_mask & neutral_mask))
+
+    return {
+        "directional_accuracy": safe_ratio(directional_hits, int(effective_mask.sum())),
+        "effective_samples": int(effective_mask.sum()),
+        "neutral_accuracy": safe_ratio(neutral_hits, int(neutral_mask.sum())),
+        "neutral_samples": int(neutral_mask.sum()),
+        "up_recall": safe_ratio(int(np.sum(pred_dir[up_mask] == 1)), int(up_mask.sum())),
+        "down_recall": safe_ratio(int(np.sum(pred_dir[down_mask] == -1)), int(down_mask.sum())),
+        "up_precision": safe_ratio(int(np.sum(actual_dir[pred_up_mask] == 1)), int(pred_up_mask.sum())),
+        "down_precision": safe_ratio(int(np.sum(actual_dir[pred_down_mask] == -1)), int(pred_down_mask.sum())),
+        "class_distribution": {
+            "actual_up": int(up_mask.sum()),
+            "actual_down": int(down_mask.sum()),
+            "actual_flat": int(neutral_mask.sum()),
+            "pred_up": int(pred_up_mask.sum()),
+            "pred_down": int(pred_down_mask.sum()),
+            "pred_flat": int(pred_neutral_mask.sum()),
+        },
+        "tolerance": neutral_tolerance,
+    }
 
 
 def _prepare_data(
-    symbol: str, 
+    symbol: str,
     period: str = "2y",
     lookback_days: int = 60
-) -> Tuple[np.ndarray, np.ndarray, object, pd.DataFrame]:
-    """Prepare training data with technical features.
-    
-    Returns:
-        X: Input sequences (samples, lookback_days, features)
-        y: Target values (samples, 1)
-        scaler: Fitted scaler object
-        df: Original dataframe with features
-    """
-    from sklearn.preprocessing import MinMaxScaler
-    
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Prepare univariate training sequences using daily returns."""
     # Get historical data
     hist_data = get_historical_prices(symbol, period=period, interval="1d")
     rows = hist_data.get("rows", [])
-    
-    if len(rows) < lookback_days + 30:  # Need enough data
-        raise ValueError(f"Insufficient data: {len(rows)} days. Need at least {lookback_days + 30} days.")
-    
-    # Convert to DataFrame
+
+    if len(rows) < lookback_days + 30:  # Need enough data for stable training
+        raise ValueError(
+            f"Insufficient data: {len(rows)} days. Need at least {lookback_days + 30} days."
+        )
+
+    # Convert to DataFrame sorted by date
     df = pd.DataFrame(rows)
     df["date"] = pd.to_datetime(df["date"])
     df = df.sort_values("date").reset_index(drop=True)
-    
-    # Calculate technical features
-    df = _calculate_technical_features(df)
-    
-    # Select features for model
-    feature_cols = MODEL_CONFIG["features"]
-    data = df[feature_cols].values
-    
-    # Scale features to [0, 1]
-    scaler = MinMaxScaler(feature_range=(0, 1))
-    scaled_data = scaler.fit_transform(data)
-    
-    # Create sequences
-    X, y = [], []
-    for i in range(lookback_days, len(scaled_data)):
-        X.append(scaled_data[i - lookback_days:i])
-        y.append(scaled_data[i, 0])  # Predict 'close' price (first feature)
-    
-    return np.array(X), np.array(y), scaler, df
+
+    close_values = df["close"].astype(float).values
+    returns = pd.Series(close_values).pct_change().dropna().values
+
+    if len(returns) <= lookback_days:
+        raise ValueError(
+            f"Need more than {lookback_days} daily returns to create training sequences."
+        )
+
+    sequences = []
+    targets = []
+    for i in range(lookback_days, len(returns)):
+        sequences.append(returns[i - lookback_days:i])
+        targets.append(returns[i])
+
+    X = np.array(sequences)[..., np.newaxis]  # Add feature dimension for LSTM input
+    y = np.array(targets)
+
+    return X, y
 
 
 def _build_model(input_shape: Tuple[int, int]) -> Any:
@@ -191,22 +246,36 @@ def train_model(
     
     logger.info(f"Training model for {sym} with {period} of data")
     
-    # Prepare data
-    X, y, scaler, df = _prepare_data(
-        sym, 
+    # Prepare unscaled sequences and targets
+    X_raw, y_raw = _prepare_data(
+        sym,
         period=period,
         lookback_days=MODEL_CONFIG["lookback_days"]
     )
-    
+
     # Train/test split (80/20)
-    split_idx = int(len(X) * 0.8)
-    X_train, X_test = X[:split_idx], X[split_idx:]
-    y_train, y_test = y[:split_idx], y[split_idx:]
-    
-    logger.info(f"Training set: {len(X_train)} samples, Test set: {len(X_test)} samples")
+    split_idx = int(len(X_raw) * 0.8)
+    if split_idx == 0 or split_idx == len(X_raw):
+        raise ValueError("Not enough samples to perform train/test split.")
+
+    X_train_raw, X_test_raw = X_raw[:split_idx], X_raw[split_idx:]
+    y_train_raw, y_test_raw = y_raw[:split_idx], y_raw[split_idx:]
+
+    logger.info(f"Training set: {len(X_train_raw)} samples, Test set: {len(X_test_raw)} samples")
+
+    # Scale using training data only to avoid leakage
+    from sklearn.preprocessing import MinMaxScaler
+
+    scaler = MinMaxScaler(feature_range=(0, 1))
+    scaler.fit(X_train_raw.reshape(-1, 1))
+
+    X_train = _scale_sequences_with_scaler(X_train_raw, scaler)
+    X_test = _scale_sequences_with_scaler(X_test_raw, scaler)
+    y_train = scaler.transform(y_train_raw.reshape(-1, 1)).reshape(-1)
+    y_test = scaler.transform(y_test_raw.reshape(-1, 1)).reshape(-1)
     
     # Build model
-    model = _build_model(input_shape=(X.shape[1], X.shape[2]))
+    model = _build_model(input_shape=(X_train.shape[1], X_train.shape[2]))
     
     # Train model
     from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
@@ -239,6 +308,14 @@ def train_model(
     val_loss = history.history['val_loss'][-1]
     train_mae = history.history['mean_absolute_error'][-1]
     val_mae = history.history['val_mean_absolute_error'][-1]
+
+    # Compute metrics in return space for easier interpretation
+    train_pred_scaled = model.predict(X_train, verbose=0).flatten()
+    val_pred_scaled = model.predict(X_test, verbose=0).flatten()
+    train_pred_returns = scaler.inverse_transform(train_pred_scaled.reshape(-1, 1)).flatten()
+    val_pred_returns = scaler.inverse_transform(val_pred_scaled.reshape(-1, 1)).flatten()
+    train_return_metrics = _compute_return_metrics(y_train_raw, train_pred_returns)
+    val_return_metrics = _compute_return_metrics(y_test_raw, val_pred_returns)
     
     # Save model and scaler
     model_path = None
@@ -264,12 +341,18 @@ def train_model(
                 "period": period,
                 "features": MODEL_CONFIG["features"],
                 "lookback_days": MODEL_CONFIG["lookback_days"],
-                "train_samples": len(X_train),
-                "test_samples": len(X_test),
+                "train_samples": len(X_train_raw),
+                "test_samples": len(X_test_raw),
                 "train_loss": float(train_loss),
                 "val_loss": float(val_loss),
                 "train_mae": float(train_mae),
                 "val_mae": float(val_mae),
+                "train_mae_return": train_return_metrics["mae"],
+                "val_mae_return": val_return_metrics["mae"],
+                "train_rmse_return": train_return_metrics["rmse"],
+                "val_rmse_return": val_return_metrics["rmse"],
+                "train_mape_pct": train_return_metrics["mape_pct"],
+                "val_mape_pct": val_return_metrics["mape_pct"],
             }, f, indent=2)
         
         logger.info(f"Model saved to {model_path}")
@@ -284,10 +367,16 @@ def train_model(
             "val_loss": float(val_loss),
             "train_mae": float(train_mae),
             "val_mae": float(val_mae),
+            "train_mae_return": train_return_metrics["mae"],
+            "val_mae_return": val_return_metrics["mae"],
+            "train_rmse_return": train_return_metrics["rmse"],
+            "val_rmse_return": val_return_metrics["rmse"],
+            "train_mape_pct": train_return_metrics["mape_pct"],
+            "val_mape_pct": val_return_metrics["mape_pct"],
         },
         "data_info": {
-            "train_samples": len(X_train),
-            "test_samples": len(X_test),
+            "train_samples": len(X_train_raw),
+            "test_samples": len(X_test_raw),
             "features": MODEL_CONFIG["features"],
             "lookback_days": MODEL_CONFIG["lookback_days"],
         },
@@ -325,7 +414,7 @@ def predict_stock_price(
     days: int = 7,
     auto_train: bool = False
 ) -> Dict[str, Any]:
-    """Predict future stock prices using trained LSTM model.
+    """Predict future stock prices using trained LSTM model on daily returns.
     
     Args:
         symbol: Stock ticker symbol
@@ -356,75 +445,66 @@ def predict_stock_price(
     # Load model and scaler
     model, scaler = _load_model_and_scaler(sym)
     
-    # Get recent data
+    # Get recent closing prices
     lookback_days = MODEL_CONFIG["lookback_days"]
     hist_data = get_historical_prices(
-        sym, 
-        period="3mo",  # Get enough data for features
+        sym,
+        period="3mo",  # Need enough history for the lookback window
         interval="1d"
     )
     rows = hist_data.get("rows", [])
-    
-    if len(rows) < lookback_days:
-        raise ValueError(f"Insufficient recent data: {len(rows)} days. Need {lookback_days} days.")
-    
-    # Prepare data
+
+    if len(rows) < lookback_days + 1:
+        raise ValueError(f"Insufficient recent data: {len(rows)} days. Need {lookback_days + 1} days.")
+
     df = pd.DataFrame(rows)
     df["date"] = pd.to_datetime(df["date"])
     df = df.sort_values("date").reset_index(drop=True)
-    
-    # Calculate technical features
-    df = _calculate_technical_features(df)
-    
-    # Get last sequence
-    feature_cols = MODEL_CONFIG["features"]
-    data = df[feature_cols].values
-    scaled_data = scaler.transform(data)
-    
-    # Use last lookback_days for prediction
-    last_sequence = scaled_data[-lookback_days:]
-    current_sequence = last_sequence.copy()
-    
-    # Predict future prices
-    predictions = []
+
+    close_values = df["close"].astype(float).values
+    returns = pd.Series(close_values).pct_change().dropna().values
+
+    if len(returns) < lookback_days:
+        raise ValueError(
+            f"Insufficient recent returns: have {len(returns)} but need {lookback_days} days of returns."
+        )
+
+    last_sequence_raw = returns[-lookback_days:].reshape(-1, 1)
+    current_sequence = scaler.transform(last_sequence_raw)
+
     prediction_dates = []
-    
+    predicted_returns = []
+    predicted_prices = []
+
     last_date = df["date"].iloc[-1]
-    
-    for i in range(days):
-        # Reshape for prediction
-        X_pred = current_sequence.reshape(1, lookback_days, len(feature_cols))
-        
-        # Predict next day
+    last_price = float(close_values[-1])
+
+    for _ in range(days):
+        X_pred = current_sequence.reshape(1, lookback_days, 1)
         pred_scaled = model.predict(X_pred, verbose=0)[0, 0]
-        
-        # Create full feature vector with predicted price
-        # Use last known values for other features (simple approach)
-        pred_features = current_sequence[-1].copy()
-        pred_features[0] = pred_scaled  # Update close price
-        
-        # Add to predictions
-        # Inverse transform to get actual price
-        full_pred = np.zeros((1, len(feature_cols)))
-        full_pred[0] = pred_features
-        actual_price = scaler.inverse_transform(full_pred)[0, 0]
-        
-        predictions.append(float(actual_price))
-        
-        # Next date (skip weekends for stock market)
-        next_date = last_date + timedelta(days=i+1)
-        while next_date.weekday() >= 5:  # Saturday=5, Sunday=6
+        pred_return = float(scaler.inverse_transform([[pred_scaled]])[0, 0])
+        predicted_returns.append(pred_return)
+
+        # Convert return to price for reporting
+        next_price = last_price * (1 + pred_return)
+        predicted_prices.append(float(next_price))
+        last_price = next_price
+
+        # Advance to the next trading day
+        next_date = last_date + timedelta(days=1)
+        while next_date.weekday() >= 5:  # Skip weekends
             next_date += timedelta(days=1)
         prediction_dates.append(next_date.strftime("%Y-%m-%d"))
-        
-        # Update sequence for next prediction
-        current_sequence = np.vstack([current_sequence[1:], pred_features])
+        last_date = next_date
+
+        # Feed prediction back into the sequence (in scaled return space)
+        current_sequence = np.vstack([current_sequence[1:], [[pred_scaled]]])
     
     # Get current price for comparison
     current_price = float(df["close"].iloc[-1])
     
     # Calculate prediction change
-    final_predicted_price = predictions[-1]
+    final_predicted_price = float(predicted_prices[-1])
     price_change = final_predicted_price - current_price
     price_change_pct = (price_change / current_price) * 100
     
@@ -441,9 +521,10 @@ def predict_stock_price(
                 "date": date,
                 "predicted_price": round(price, 2),
                 "change_from_current": round(price - current_price, 2),
-                "change_pct": round(((price - current_price) / current_price) * 100, 2)
+                "change_pct": round(((price - current_price) / current_price) * 100, 2),
+                "predicted_return_pct": round(ret * 100, 2),
             }
-            for date, price in zip(prediction_dates, predictions)
+            for date, price, ret in zip(prediction_dates, predicted_prices, predicted_returns)
         ],
         "summary": {
             "final_predicted_price": round(final_predicted_price, 2),
@@ -454,10 +535,58 @@ def predict_stock_price(
         },
         "model_info": {
             "lookback_days": lookback_days,
-            "features_used": feature_cols,
+            "features_used": MODEL_CONFIG["features"],
         },
         "source": "lstm_prediction",
         "disclaimer": "This is an AI prediction for educational purposes only. Not financial advice."
+    }
+
+
+def evaluate_model_accuracy(symbol: str, period: str = "6mo") -> Dict[str, Any]:
+    """Evaluate a trained model on historical daily returns to verify accuracy."""
+    sym = _normalize_symbol(symbol)
+    if not sym or not TICKER_RE.match(sym):
+        raise ValueError("Invalid symbol")
+
+    model, scaler = _load_model_and_scaler(sym)
+
+    X_raw, y_raw = _prepare_data(
+        sym,
+        period=period,
+        lookback_days=MODEL_CONFIG["lookback_days"]
+    )
+
+    if len(X_raw) == 0:
+        raise ValueError("Not enough data to evaluate accuracy.")
+
+    X_scaled = _scale_sequences_with_scaler(X_raw, scaler)
+    preds_scaled = model.predict(X_scaled, verbose=0).flatten()
+    preds_returns = scaler.inverse_transform(preds_scaled.reshape(-1, 1)).flatten()
+
+    metrics = _compute_return_metrics(y_raw, preds_returns)
+    directional_metrics = _compute_directional_accuracy(y_raw, preds_returns)
+
+    recent_examples = [
+        {
+            "actual_return_pct": round(float(actual) * 100, 2),
+            "predicted_return_pct": round(float(pred) * 100, 2),
+            "error_pct": round(float((pred - actual) * 100), 2),
+        }
+        for actual, pred in zip(y_raw[-5:], preds_returns[-5:])
+    ]
+
+    return {
+        "symbol": sym,
+        "period": period,
+        "samples": len(y_raw),
+        "metrics": {
+            "mae_return": metrics["mae"],
+            "rmse_return": metrics["rmse"],
+            "mape_pct": metrics["mape_pct"],
+        },
+        "directional_metrics": directional_metrics,
+        "recent_examples": recent_examples,
+        "source": "lstm_prediction",
     }
 
 

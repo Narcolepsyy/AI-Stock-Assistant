@@ -18,7 +18,8 @@ from app.services.stock_prediction_service import (
     train_model,
     predict_stock_price,
     get_model_info,
-    list_available_models
+    list_available_models,
+    evaluate_model_accuracy,
 )
 
 
@@ -130,6 +131,38 @@ def test_list_models():
         return False
 
 
+def test_accuracy_check():
+    """Verify accuracy metrics on recent historical data."""
+    print("\n" + "=" * 60)
+    print("TEST 5: Accuracy Verification")
+    print("=" * 60)
+
+    try:
+        result = evaluate_model_accuracy("AAPL", period="6mo")
+        metrics = result['metrics']
+
+        print("✓ Accuracy evaluation completed!")
+        print(f"  Samples: {result['samples']}")
+        print(f"  MAE (returns):  {metrics['mae_return']*100:.2f}%")
+        print(f"  RMSE (returns): {metrics['rmse_return']*100:.2f}%")
+        print(f"  MAPE: {metrics['mape_pct']:.2f}%")
+
+        if result['recent_examples']:
+            print("\n  Recent examples:")
+            for item in result['recent_examples']:
+                print(
+                    f"    Actual Return: {item['actual_return_pct']:+.2f}% | "
+                    f"Predicted: {item['predicted_return_pct']:+.2f}% | "
+                    f"Error: {item['error_pct']:+.2f}%"
+                )
+
+        return True
+
+    except Exception as e:
+        print(f"✗ Accuracy evaluation failed: {e}")
+        return False
+
+
 def main():
     """Run all tests."""
     print("\n🧪 Stock Prediction Service Tests")
@@ -148,6 +181,9 @@ def main():
     
     # Test 4: List Models
     results.append(("List Models", test_list_models()))
+
+    # Test 5: Accuracy Verification
+    results.append(("Accuracy Verification", test_accuracy_check()))
     
     # Summary
     print("\n" + "=" * 60)
