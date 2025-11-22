@@ -5,7 +5,7 @@
 import React, { useState } from 'react'
 import { AuthForm } from './components/auth'
 import { LoadingSpinner } from './components/ui'
-import { MarketSentiment } from './components/market'
+
 import ChatLayout from './components/ChatLayout'
 import Dashboard from './components/Dashboard'
 import StockDetail from './components/StockDetail'
@@ -68,21 +68,19 @@ const AppContent: React.FC<{ auth: ReturnType<typeof useAuth> }> = ({ auth }) =>
                   <div className="flex space-x-2">
                     <button
                       onClick={() => setCurrentView('chat')}
-                      className={`px-4 py-2 rounded-lg font-medium transition-colors ${
-                        currentView === 'chat'
+                      className={`px-4 py-2 rounded-lg font-medium transition-colors ${currentView === 'chat'
                           ? 'bg-blue-600 text-white'
                           : 'text-gray-300 hover:bg-gray-700'
-                      }`}
+                        }`}
                     >
                       Chat
                     </button>
                     <button
                       onClick={() => setCurrentView('dashboard')}
-                      className={`px-4 py-2 rounded-lg font-medium transition-colors ${
-                        currentView === 'dashboard'
+                      className={`px-4 py-2 rounded-lg font-medium transition-colors ${currentView === 'dashboard'
                           ? 'bg-blue-600 text-white'
                           : 'text-gray-300 hover:bg-gray-700'
-                      }`}
+                        }`}
                     >
                       Dashboard
                     </button>
@@ -90,8 +88,8 @@ const AppContent: React.FC<{ auth: ReturnType<typeof useAuth> }> = ({ auth }) =>
                 </div>
                 <div className="flex items-center space-x-4">
                   {/* Market Sentiment Indicator */}
-                  <MarketSentiment />
-                  
+
+
                   <span className="text-gray-300 text-sm">{auth.user.username}</span>
                   <button
                     onClick={() => auth.logout()}

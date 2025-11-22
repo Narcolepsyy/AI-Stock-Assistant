@@ -954,6 +954,13 @@ def get_market_indices(region: str = "global") -> Dict[str, Any]:
         "source": "yfinance"
     }
 
+def get_market_summary() -> Dict[str, Any]:
+    """Get comprehensive market summary including global indices performance and market sentiment.
+    
+    This is a convenience wrapper around get_market_indices that provides a global market overview.
+    """
+    return get_market_indices(region="global")
+
 def get_market_cap_details(symbol: str) -> Dict[str, Any]:
     """Get comprehensive market capitalization and valuation metrics for a stock."""
     sym = normalize_symbol(symbol)

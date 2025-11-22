@@ -32,6 +32,7 @@ from app.services.stock.providers.yfinance import (
     get_institutional_holders,
     get_dividends_splits,
     get_market_indices,
+    get_market_summary,
     get_market_cap_details
 )
 from app.services.stock.news import (
@@ -66,6 +67,7 @@ __all__ = [
     "get_institutional_holders",
     "get_dividends_splits",
     "get_market_indices",
+    "get_market_summary",
     "get_market_cap_details",
     "get_risk_assessment",
     "get_technical_indicators",

@@ -29,7 +29,7 @@ MODEL_CONFIG = {
     "lstm_units": [64, 32, 16],  # 3-layer LSTM with decreasing units
     "dropout": 0.2,
     "lookback_days": 60,  # Use 60 days of history
-    "prediction_days": 7,  # Predict next 7 days
+    "prediction_days": 1,  # Predict next 1 day
     "batch_size": 32,
     "epochs": 50,
     "features": ["return"],  # Model operates on daily returns instead of raw prices
@@ -411,14 +411,14 @@ def _load_model_and_scaler(symbol: str) -> Tuple[Any, Any]:
 
 def predict_stock_price(
     symbol: str,
-    days: int = 7,
+    days: int = 1,
     auto_train: bool = False
 ) -> Dict[str, Any]:
     """Predict future stock prices using trained LSTM model on daily returns.
     
     Args:
         symbol: Stock ticker symbol
-        days: Number of days to predict (default: 7)
+        days: Number of days to predict (default: 1)
         auto_train: Auto-train model if not found (default: False)
     
     Returns:

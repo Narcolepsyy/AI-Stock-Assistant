@@ -573,7 +573,7 @@ async def chat_stream_endpoint(
                 try:
                     chunk_count = 0
                     any_text = False
-                    for chunk in stream:
+                    async for chunk in stream:
                         chunk_count += 1
 
                         # Safety check for runaway streams
