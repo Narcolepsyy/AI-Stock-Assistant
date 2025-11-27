@@ -17,6 +17,14 @@ RAW_TOOL_CALL_JSON_RE = re.compile(
     r'\{\s*"query"\s*:\s*"[^"]*",\s*"max_results"\s*:\s*\d+,\s*"synthesize_answer"\s*:\s*true,\s*"include_recent"\s*:\s*true\s*\}',
     re.IGNORECASE | re.DOTALL
 )
+RAW_TOOL_CALL_FRAGMENT_RE = re.compile(
+    r'"query"\s*:\s*"[^"]*"\s*,\s*"max_results"\s*:\s*\d+',
+    re.IGNORECASE | re.DOTALL
+)
+REASONING_LINE_RE = re.compile(
+    r"^\s*(?:reasoning|analysis|thought process|deliberation|scratchpad)[:：]\s*",
+    re.IGNORECASE
+)
 
 def is_raw_tool_call_output(text: str) -> bool:
     """
@@ -28,6 +36,12 @@ def is_raw_tool_call_output(text: str) -> bool:
     
     # Check for JSON tool call patterns
     if RAW_TOOL_CALL_JSON_RE.search(text):
+        return True
+
+    # Catch partial/fragmented tool payloads that models (e.g., GPT-5) emit as reasoning text
+    if RAW_TOOL_CALL_FRAGMENT_RE.search(text) and (
+        '"synthesize_answer"' in text or '"include_recent"' in text
+    ):
         return True
     
     # Check for multiple JSON objects in succession (tool call spam)
@@ -84,6 +98,8 @@ def sanitize_perplexity_result(result: Any) -> Any:
             truncated = smart_truncate_answer(answer, TRUNC_MAX_CHARS)
             # Remove any '[0]' citations (model sometimes enumerates from zero) – shift discouraged
             truncated = truncated.replace("[0]", "")
+            # Remove verbose source markers that leak to the user
+            truncated = re.sub(r"\s*\|\s*source=\w+\s*", " ", truncated).strip()
             # Remove lingering broken citation fragments inside (conservative: only if near end)
             tail = truncated[-120:]
             cleaned_tail = BROKEN_CITATION_FRAGMENT_RE.sub("", tail)
@@ -199,15 +215,42 @@ def normalize_content_piece(piece: Any) -> str:
         if piece is None:
             return ""
         if isinstance(piece, str):
-            return piece
+            return _strip_reasoning_text(piece)
         # Content piece could be dict-like {type: 'text', 'text': '...'}
         if isinstance(piece, dict):
+            piece_type = str(piece.get("type") or "").lower()
+            # Hide explicit reasoning chunks emitted by reasoning-capable models (e.g., GPT-5)
+            if piece_type in {"reasoning", "analysis", "reflection"}:
+                return ""
             txt = piece.get("text") or piece.get("content") or ""
-            return txt if isinstance(txt, str) else json.dumps(piece)[:2000]
+            normalized = txt if isinstance(txt, str) else json.dumps(txt)[:2000]
+            return _strip_reasoning_text(normalized)
         # Fallback stringify
-        return str(piece)
+        return _strip_reasoning_text(str(piece))
     except Exception:
         return ""
+
+def _strip_reasoning_text(text: str) -> str:
+    """Remove visible reasoning lines/prefixes emitted by reasoning models."""
+    if not text:
+        return ""
+    filtered_lines = []
+    for line in text.splitlines():
+        if REASONING_LINE_RE.match(line):
+            continue
+        if _looks_like_tool_preamble(line):
+            continue
+        filtered_lines.append(line)
+    return "\n".join(filtered_lines)
+
+
+def _looks_like_tool_preamble(line: str) -> bool:
+    """Detect planning-style lines (e.g., GPT-5 reasoning) that describe upcoming tool calls."""
+    lowered = line.strip().lower()
+    if lowered.startswith(("searching for", "looking for", "looking up", "gathering", "fetching")):
+        if "{" in line or '"query"' in line or "max_results" in line or "synthesize_answer" in line:
+            return True
+    return False
 
 def safe_tool_result_json(payload: Any) -> str:
     """Serialize tool payloads without raising on non-JSON types."""

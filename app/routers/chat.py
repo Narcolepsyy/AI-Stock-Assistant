@@ -28,6 +28,9 @@ from app.utils.request_cache import (
     get_cached_response, cache_response, is_request_in_flight,
     mark_request_in_flight, clear_request_in_flight
 )
+from app.utils.semantic_cache import (
+    get_semantic_cached_response, store_semantic_response
+)
 from app.utils.query_optimizer import (
     is_simple_query, get_fast_model_recommendation, should_skip_rag_and_web_search
 )
@@ -205,14 +208,28 @@ async def chat_stream_endpoint(
 
     # Check cache first for performance boost (only for non-reset, existing conversations)
     cached_response = None
+    semantic_cached: Optional[Dict[str, Any]] = None
     if not req.reset and not req.conversation_id:
         cached_response = get_cached_response(req.prompt, req.deployment or DEFAULT_MODEL, messages_for_cache)
-    if cached_response:
-        # Return cached response as stream
+        if not cached_response:
+            semantic_cached = get_semantic_cached_response(
+                req.prompt,
+                req.deployment or DEFAULT_MODEL,
+                sys_prompt_for_cache or ""
+            )
+
+    def _stream_cached(payload: Dict[str, Any], semantic: bool = False) -> StreamingResponse:
         async def serve_cached():
-            yield f"data: {json.dumps({'type': 'start', 'conversation_id': cached_response.get('conversation_id', ''), 'model': 'cached', 'cached': True})}\n\n"
-            content = cached_response.get('content', '')
-            # Stream cached content in chunks for consistent UX
+            start_event = {
+                "type": "start",
+                "conversation_id": payload.get("conversation_id", ""),
+                "model": "semantic-cache" if semantic else "cached",
+                "cached": True,
+            }
+            if semantic and "similarity" in payload:
+                start_event["similarity"] = round(float(payload["similarity"]), 3)
+            yield f"data: {json.dumps(start_event)}\n\n"
+            content = payload.get('content', '')
             chunk_size = 50
             for i in range(0, len(content), chunk_size):
                 chunk = content[i:i+chunk_size]
@@ -220,6 +237,11 @@ async def chat_stream_endpoint(
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
         return StreamingResponse(serve_cached(), media_type="text/event-stream")
+
+    if cached_response:
+        return _stream_cached(cached_response, semantic=False)
+    if semantic_cached:
+        return _stream_cached(semantic_cached, semantic=True)
 
     # Reuse messages from cache lookup, or re-fetch if reset is requested
     if req.reset:
@@ -262,6 +284,14 @@ async def chat_stream_endpoint(
     else:
         selected_tools = build_tools_for_request(req.prompt, getattr(req, "capabilities", None), skip_heavy_tools=skip_heavy)
         tool_metadata = {'method': 'rule-based', 'ml_enabled': False}
+    
+    # Filter out web search tools if web_search_enabled is False
+    if not getattr(req, 'web_search_enabled', True):
+        selected_tools = [
+            tool for tool in selected_tools 
+            if tool.get("function", {}).get("name") not in _WEB_SEARCH_TOOL_NAMES
+        ]
+        logger.info("Web search disabled by user - filtered out web search tools")
     
     selected_tool_names = {tool.get("function", {}).get("name") for tool in selected_tools}
     logger.debug(
@@ -344,6 +374,31 @@ async def chat_stream_endpoint(
             resolved = _resolve_max_tokens(default)
             return min(resolved, default)
 
+        def _attach_web_search_to_news(summary: Dict[str, Any], args: Dict[str, Any]) -> Dict[str, Any]:
+            """Enrich news summary with a lightweight web search payload for freshness."""
+            web_payload: Dict[str, Any] = {}
+            search_query = (args.get("symbol") or "").strip() or "latest market news"
+            try:
+                web_result = TOOL_REGISTRY["perplexity_search"](
+                    query=f"{search_query} 最新ニュース",
+                    max_results=int(args.get("web_results", 6) or 6),
+                    synthesize_answer=True,
+                    include_recent=True,
+                )
+                if isinstance(web_result, dict):
+                    web_result = sanitize_perplexity_result(web_result)
+                    web_payload = build_web_search_tool_payload(web_result)
+                else:
+                    web_payload = {"answer": str(web_result)}
+            except Exception as e:
+                web_payload = {"error": f"web_search_failed: {e}"}
+
+            if web_payload:
+                merged = dict(summary)
+                merged["web_search"] = web_payload
+                return merged
+            return summary
+
         def _execute_single_tool(tc: Dict[str, Any]) -> tuple[str, Dict[str, Any], Optional[str]]:
             """Execute a single tool call. Returns (tool_call_id, result, error_message)."""
             try:
@@ -369,7 +424,7 @@ async def chat_stream_endpoint(
                     # Special handling: summarize augmented news to keep context small 
                     if name == "get_augmented_news" and isinstance(result, dict):
                         summary = build_news_summary(result)
-                        result = {**summary}
+                        result = _attach_web_search_to_news(summary, args)
                     # Truncate large generic tool results to control costs
                     elif isinstance(result, dict) and "items" in result and name != "get_augmented_news":
                         if len(result.get("items", [])) > 5:
@@ -553,6 +608,8 @@ async def chat_stream_endpoint(
                         # Normalize content if it's a structured payload
                         if isinstance(content, list):
                             content = "".join(normalize_content_piece(p) for p in content)
+                        else:
+                            content = normalize_content_piece(content)
                         content = content or ""
                         if content:
                             full_content += content
@@ -586,6 +643,11 @@ async def chat_stream_endpoint(
 
                         delta = chunk.choices[0].delta
 
+                        # Drop explicit reasoning_content payloads (GPT-5) to avoid exposing chain-of-thought
+                        if getattr(delta, "reasoning_content", None):
+                            logger.debug("Skipping reasoning_content chunk from model output")
+                            # Do not stream or store reasoning content
+
                         # Handle content streaming (support string or list shards)
                         if hasattr(delta, 'content') and delta.content:
                             if isinstance(delta.content, list):
@@ -605,13 +667,16 @@ async def chat_stream_endpoint(
                                     # Use pre-compiled response for better performance
                                     yield f"data: {_PRECOMPILED_RESPONSES['content'](converted_text)}\n\n"
                             elif isinstance(delta.content, str):
+                                cleaned_piece = normalize_content_piece(delta.content)
+                                if not cleaned_piece:
+                                    continue
                                 # Skip raw tool call JSON outputs from GPT-5
-                                if is_raw_tool_call_output(delta.content):
+                                if is_raw_tool_call_output(cleaned_piece):
                                     logger.debug(f"Filtered out raw tool call JSON from {model_name}")
                                     continue
                                 
                                 # Convert LaTeX format for frontend compatibility
-                                converted_text = _convert_latex_format(delta.content)
+                                converted_text = _convert_latex_format(cleaned_piece)
                                 assistant_msg["content"] += converted_text
                                 full_content += converted_text
                                 any_text = True
@@ -895,6 +960,7 @@ async def chat_stream_endpoint(
                     'conversation_id': conv_id
                 }
                 cache_response(req.prompt, model_key, cache_data, messages)
+                store_semantic_response(req.prompt, model_key, sys_prompt_for_cache, cache_data)
                 logger.debug(f"Cached streaming response for conversation {conv_id}")
             except Exception as e:
                 logger.warning(f"Failed to cache streaming response: {e}")
@@ -945,15 +1011,25 @@ async def chat_endpoint(
         if fast_model:
             logger.info(f"Using fast model {fast_model} for simple query type: {query_type}")
             model_key = fast_model
+
+    # Inject locale-specific instruction into system prompt if requested (and reuse for caching)
+    sys_prompt = req.system_prompt or ""
+    if (req.locale or "en").lower().startswith("ja"):
+        sys_prompt = (sys_prompt or "").rstrip() + _JAPANESE_DIRECTIVE
     
     # Check request cache for identical queries (performance optimization)
-    sys_prompt = req.system_prompt or ""
     if not req.reset and not req.conversation_id:
         # Only cache for new conversations without reset
         cached = get_cached_response(req.prompt, model_key, sys_prompt)
         if cached:
             logger.info(f"Returning cached response for prompt hash")
             return ChatResponse(**cached)
+        
+        semantic_cached = get_semantic_cached_response(req.prompt, model_key, sys_prompt)
+        if semantic_cached:
+            logger.info("Semantic cache HIT for non-streaming chat")
+            # semantic_cached may include similarity; ChatResponse ignores extra keys
+            return ChatResponse(**{k: v for k, v in semantic_cached.items() if k in {"content", "tool_calls", "conversation_id"}})
         
         # Check if an identical request is already being processed
         if is_request_in_flight(req.prompt, model_key, sys_prompt):
@@ -964,16 +1040,14 @@ async def chat_endpoint(
             cached = get_cached_response(req.prompt, model_key, sys_prompt)
             if cached:
                 return ChatResponse(**cached)
+            semantic_cached = get_semantic_cached_response(req.prompt, model_key, sys_prompt)
+            if semantic_cached:
+                return ChatResponse(**{k: v for k, v in semantic_cached.items() if k in {"content", "tool_calls", "conversation_id"}})
         
         # Mark this request as in-flight
         mark_request_in_flight(req.prompt, model_key, sys_prompt)
 
     # Use enhanced memory-aware message preparation
-    # Inject locale-specific instruction into system prompt if requested
-    sys_prompt = req.system_prompt
-    if (req.locale or "en").lower().startswith("ja"):
-        sys_prompt = (sys_prompt or "").rstrip() + _JAPANESE_DIRECTIVE
-
     messages, conv_id = await prepare_conversation_messages_with_memory(
         req.prompt, sys_prompt, req.conversation_id or "", req.reset, str(user.id), model_key
     )
@@ -1053,6 +1127,31 @@ async def chat_endpoint(
         resolved = resolve_max_tokens(default)
         return min(resolved, default)
 
+    def attach_web_search_to_news(summary: Dict[str, Any], args: Dict[str, Any]) -> Dict[str, Any]:
+        """Enrich news summary with a lightweight web search payload for freshness."""
+        web_payload: Dict[str, Any] = {}
+        search_query = (args.get("symbol") or "").strip() or "latest market news"
+        try:
+            web_result = TOOL_REGISTRY["perplexity_search"](
+                query=f"{search_query} 最新ニュース",
+                max_results=int(args.get("web_results", 6) or 6),
+                synthesize_answer=True,
+                include_recent=True,
+            )
+            if isinstance(web_result, dict):
+                web_result = sanitize_perplexity_result(web_result)
+                web_payload = build_web_search_tool_payload(web_result)
+            else:
+                web_payload = {"answer": str(web_result)}
+        except Exception as e:
+            web_payload = {"error": f"web_search_failed: {e}"}
+
+        if web_payload:
+            merged = dict(summary)
+            merged["web_search"] = web_payload
+            return merged
+        return summary
+
 
     def _run_tools(tc_list: List[Dict[str, Any]], max_rounds: int = 2):
         """Execute tool calls and append results to messages."""
@@ -1111,26 +1210,26 @@ async def chat_endpoint(
                         try:
                             result = impl(**(args or {}))
                             if name == "get_augmented_news" and isinstance(result, dict):
-                                result = _build_news_summary(result)
+                                result = attach_web_search_to_news(build_news_summary(result), args)
                             if isinstance(result, dict) and "items" in result and name != "get_augmented_news":
                                 if len(result.get("items", [])) > 5:
                                     result["items"] = result["items"][:5]
                                     result["truncated"] = True
                             if name == "perplexity_search" and isinstance(result, dict):
-                                result = _sanitize_perplexity_result(result)
+                                result = sanitize_perplexity_result(result)
                         except Exception as e:
                             logger.error(f"Tool execution error for {name}: {e}")
                             result = {"error": str(e)}
 
                     if name in _WEB_SEARCH_TOOL_NAMES and isinstance(result, dict):
-                        payload = _build_web_search_tool_payload(result)
-                        result_str = _safe_tool_result_json(payload)
+                        payload = build_web_search_tool_payload(result)
+                        result_str = safe_tool_result_json(payload)
                         if estimate_tokens(result_str) > 768:
                             compact_payload = dict(payload)
                             compact_payload.pop("top_sources", None)
-                            result_str = _safe_tool_result_json(compact_payload)
+                            result_str = safe_tool_result_json(compact_payload)
                     else:
-                        result_str = _safe_tool_result_json(result)
+                        result_str = safe_tool_result_json(result)
                         if estimate_tokens(result_str) > 512:
                             result_str = result_str[:2000] + "... [truncated]"
 
@@ -1287,13 +1386,12 @@ async def chat_endpoint(
         # No tool calls; finalize
         final_content = assistant_msg.get("content") or ""
         if isinstance(final_content, list):
-            final_content = "".join(
-                (p.get("text") if isinstance(p, dict) and isinstance(p.get("text"), str) else str(p))
-                for p in final_content
-            )
+            final_content = "".join(normalize_content_piece(p) for p in final_content)
+        else:
+            final_content = normalize_content_piece(final_content)
         
         # Filter out raw tool call JSON outputs from GPT-5
-        if _is_raw_tool_call_output(final_content):
+        if is_raw_tool_call_output(final_content):
             logger.info(f"Filtered out raw tool call JSON from non-streaming response")
             final_content = "検索を実行中です。しばらくお待ちください。"  # "Executing search. Please wait."
         
@@ -1331,7 +1429,9 @@ async def chat_endpoint(
             msg = getattr(choice, "message", None)
             content = getattr(msg, "content", "") if msg else ""
             if isinstance(content, list):
-                content = "".join(_normalize_content_piece(p) for p in content)
+                content = "".join(normalize_content_piece(p) for p in content)
+            else:
+                content = normalize_content_piece(content)
             
             if content and content.strip():
                 final_content = _convert_latex_format(content)
@@ -1378,17 +1478,17 @@ async def chat_endpoint(
                         fallback_parts.append(_human_preview_historical(res))
             
             # Combine all parts or use generic fallback
-            if fallback_parts:
-                final_content = _convert_latex_format("\n\n".join(fallback_parts))
-            else:
-                # Generic JSON fallback for unhandled tools
-                try:
-                    last = tool_call_results[-1] if tool_call_results else None
-                    final_content = _convert_latex_format(
-                        _safe_tool_result_json(last.get("result"))[:400] + "..."
-                    )
-                except Exception:
-                    final_content = "(tool result received)"
+                if fallback_parts:
+                    final_content = _convert_latex_format("\n\n".join(fallback_parts))
+                else:
+                    # Generic JSON fallback for unhandled tools
+                    try:
+                        last = tool_call_results[-1] if tool_call_results else None
+                        final_content = _convert_latex_format(
+                            safe_tool_result_json(last.get("result"))[:400] + "..."
+                        )
+                    except Exception:
+                        final_content = "(tool result received)"
         except Exception as e:
             logger.error(f"Non-streaming fallback generation error: {e}")
             pass
@@ -1425,6 +1525,7 @@ async def chat_endpoint(
     if not req.reset and not req.conversation_id:
         try:
             cache_response(req.prompt, model_key, sys_prompt, response.dict())
+            store_semantic_response(req.prompt, model_key, sys_prompt, response.dict())
         except Exception as e:
             logger.warning(f"Failed to cache response: {e}")
         finally:

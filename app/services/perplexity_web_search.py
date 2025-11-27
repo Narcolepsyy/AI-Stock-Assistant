@@ -310,7 +310,8 @@ class BraveSearchClient:
     
     def __init__(self):
         """Initialize Brave Search client with API key and rate limiting."""
-        self.api_key = BRAVE_API_KEY
+        # Normalize API key to avoid whitespace/newline-induced auth failures
+        self.api_key = (BRAVE_API_KEY or "").strip()
         self.base_url = BRAVE_API_BASE_URL
         self.timeout = aiohttp.ClientTimeout(total=10, connect=3)
         # Fix: Correct Brave API headers format
@@ -523,16 +524,23 @@ class BraveSearchClient:
                     except Exception as e:
                         logger.warning(f"Brave Search API response parsing error: {e}")
                         return []
-                
                 elif response.status == 422:
                     # Handle parameter validation errors by retrying with relaxed params
-                    logger.warning("Brave Search API parameter validation error (422), retrying with relaxed params")
+                    try:
+                        error_body = await response.text()
+                    except Exception:
+                        error_body = "<unavailable>"
+                    logger.warning(
+                        "Brave Search API parameter validation error (422), retrying with relaxed params; body=%s",
+                        error_body[:500]
+                    )
+                    if "SUBSCRIPTION_TOKEN_INVALID" in error_body:
+                        logger.warning("Brave API token appears invalid. Check BRAVE_API_KEY value/config.")
                     
                     # Retry with minimal parameters
                     minimal_params = {
                         'q': query,
-                        'count': min(count, 10),  # Reduce count
-                        'safesearch': 'moderate'
+                        'count': min(count, 10)  # Reduce count
                     }
                     # Respect rate limiting before retry
                     await asyncio.sleep(self._min_request_interval + 0.2)
@@ -548,6 +556,30 @@ class BraveSearchClient:
                             except Exception as e:
                                 logger.warning(f"Brave Search retry also failed: {e}")
                                 return []
+                        elif retry_response.status == 422:
+                            try:
+                                retry_error_body = await retry_response.text()
+                            except Exception:
+                                retry_error_body = "<unavailable>"
+                            logger.warning(
+                                "Brave Search retry failed with 422; body=%s. Will try bare-minimum params.",
+                                retry_error_body[:500]
+                            )
+                            # Final ultra-minimal attempt with only 'q'
+                            await asyncio.sleep(self._min_request_interval + 0.2)
+                            async with session.get(self.base_url, params={'q': query}) as retry2:
+                                if retry2.status == 200:
+                                    try:
+                                        data = await retry2.json()
+                                        raw_results = self._parse_brave_results(data, query)
+                                        quality_results = self._apply_quality_filtering(raw_results, query)
+                                        reranked_results = self._rerank_by_quality(quality_results, query)
+                                        logger.info(f"Brave Search ultra-minimal retry: {len(reranked_results)} results")
+                                        return reranked_results
+                                    except Exception as e:
+                                        logger.warning(f"Brave ultra-minimal retry parse failed: {e}")
+                                else:
+                                    logger.warning(f"Brave ultra-minimal retry failed with status: {retry2.status}")
                         elif retry_response.status == 429:
                             # Wait and make one final retry attempt
                             logger.warning("Brave Search retry hit rate limit (429); backing off and retrying once")
@@ -3708,12 +3740,8 @@ Provide a complete, well-researched answer with proper citations:"""
             if snippet:
                 snippet = re.sub(r"\s+", " ", snippet)
                 snippet = snippet[:240].rstrip()
-            descriptor_parts = [f"[{result.citation_id}] {title}"]
-            if result.source:
-                descriptor_parts.append(f"source={result.source}")
-            if result.domain_boost and result.domain_boost > 1.0:
-                descriptor_parts.append("high_quality")
-            header = " | ".join(descriptor_parts)
+            # Keep user-facing header simple: citation id + title only
+            header = f"[{result.citation_id}] {title}"
             if snippet:
                 summary_lines.append(f"{header}\n  {snippet}")
             else:

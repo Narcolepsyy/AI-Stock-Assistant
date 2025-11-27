@@ -123,6 +123,10 @@ SUMMARY_MODEL = os.getenv("SUMMARY_MODEL", "gpt-4o-mini")
 ENABLE_RESPONSE_CACHE = os.getenv("ENABLE_RESPONSE_CACHE", "true").lower() in {"1", "true", "yes"}
 RESPONSE_CACHE_TTL = int(os.getenv("RESPONSE_CACHE_TTL", "300"))  # 5 minutes
 SIMPLE_QUERY_CACHE_TTL = int(os.getenv("SIMPLE_QUERY_CACHE_TTL", "60"))  # 1 minute for simple queries
+SEMANTIC_CACHE_ENABLED = os.getenv("SEMANTIC_CACHE_ENABLED", "true").lower() in {"1", "true", "yes"}
+SEMANTIC_CACHE_MAX_ITEMS = int(os.getenv("SEMANTIC_CACHE_MAX_ITEMS", "128"))
+SEMANTIC_CACHE_TTL = int(os.getenv("SEMANTIC_CACHE_TTL", str(60 * 15)))  # 15 minutes
+SEMANTIC_CACHE_THRESHOLD = float(os.getenv("SEMANTIC_CACHE_THRESHOLD", "0.92"))
 
 # Simple query patterns that don't need RAG/tools
 SIMPLE_QUERY_PATTERNS = [
