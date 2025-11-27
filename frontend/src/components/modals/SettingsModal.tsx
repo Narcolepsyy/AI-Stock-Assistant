@@ -81,6 +81,36 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
             </select>
           </div>
         )}
+
+        {/* Web Search Toggle */}
+        <div className="flex items-center justify-between">
+          <div>
+            <label className="block text-sm font-medium text-gray-300">
+              {translate('webSearchEnabled', locale)}
+            </label>
+            <p className="text-xs text-gray-500 mt-1">
+              {translate('webSearchEnabledDescription', locale)}
+            </p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={settings.webSearchEnabled}
+            onClick={() => onSettingsChange(prev => ({
+              ...prev,
+              webSearchEnabled: !prev.webSearchEnabled
+            }))}
+            className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-gray-800 ${
+              settings.webSearchEnabled ? 'bg-blue-600' : 'bg-gray-600'
+            }`}
+          >
+            <span
+              className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+                settings.webSearchEnabled ? 'translate-x-5' : 'translate-x-0'
+              }`}
+            />
+          </button>
+        </div>
       </div>
     </Modal>
   )

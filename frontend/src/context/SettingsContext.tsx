@@ -33,17 +33,20 @@ const loadStoredSettings = (): Partial<AppSettings> => {
   try {
     const storedPrompt = localStorage.getItem(STORAGE_KEYS.SYSTEM_PROMPT)
     const storedDeployment = localStorage.getItem(STORAGE_KEYS.SELECTED_MODEL) || ''
+    const storedWebSearch = localStorage.getItem(STORAGE_KEYS.WEB_SEARCH_ENABLED)
     const locale = getStoredLocale()
     return {
       systemPrompt: storedPrompt ?? DEFAULT_SYSTEM_PROMPT,
       deployment: storedDeployment,
       locale,
+      webSearchEnabled: storedWebSearch !== null ? storedWebSearch === 'true' : true,
     }
   } catch {
     return {
       systemPrompt: DEFAULT_SYSTEM_PROMPT,
       deployment: '',
       locale: getStoredLocale(),
+      webSearchEnabled: true,
     }
   }
 }
@@ -69,6 +72,7 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     systemPrompt: DEFAULT_SYSTEM_PROMPT,
     deployment: '',
     locale: getStoredLocale(),
+    webSearchEnabled: true,
     ...loadStoredSettings(),
   }))
 
@@ -84,6 +88,7 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       } else {
         localStorage.removeItem(STORAGE_KEYS.SELECTED_MODEL)
       }
+      localStorage.setItem(STORAGE_KEYS.WEB_SEARCH_ENABLED, String(next.webSearchEnabled))
       setStoredLocale(next.locale)
     } catch {
       // Swallow storage errors silently

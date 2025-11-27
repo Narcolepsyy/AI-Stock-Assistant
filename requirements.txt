@@ -42,5 +42,6 @@ boto3>=1.34.0
 botocore>=1.34.0
 
 # Machine Learning for Stock Prediction (Lightweight for GTX 1650 Ti - 4GB VRAM)
-tensorflow>=2.15.0,<2.16.0  # Optimized version for GPU
+tensorflow>=2.16.0  # Optimized version for GPU
 scikit-learn>=1.3.0  # For data preprocessing and scaling
+sentence-transformers>=2.5.1  # For text embeddings

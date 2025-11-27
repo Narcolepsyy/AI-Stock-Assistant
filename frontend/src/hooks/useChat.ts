@@ -15,6 +15,7 @@ interface ChatRequest {
   deployment: string
   conversation_id?: string
   locale: 'en' | 'ja'
+  web_search_enabled?: boolean
 }
 
 export const useChat = () => {

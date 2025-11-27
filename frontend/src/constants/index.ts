@@ -19,6 +19,7 @@ export const STORAGE_KEYS = {
   SELECTED_MODEL: 'selected_model',
   SYSTEM_PROMPT: 'system_prompt',
   LOCALE: 'locale',
+  WEB_SEARCH_ENABLED: 'web_search_enabled',
 } as const
 
 // API endpoints and configuration

@@ -167,6 +167,7 @@ const ChatLayout: React.FC<ChatLayoutProps> = ({ user, onLogout }) => {
         deployment: settings.deployment,
         conversation_id: conversationId || undefined,
         locale: settings.locale,
+        web_search_enabled: settings.webSearchEnabled,
       },
       // Pass updater that ensures user message is included
       (updater) => {

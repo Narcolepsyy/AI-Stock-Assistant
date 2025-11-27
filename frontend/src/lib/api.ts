@@ -146,6 +146,7 @@ export type ChatRequest = {
   reset?: boolean
   stream?: boolean  // Add streaming support
   locale?: 'en' | 'ja'
+  web_search_enabled?: boolean  // Whether to enable web search tools
 }
 
 export type ChatResponse = {

@@ -55,7 +55,11 @@ def _get_embeddings():
         # Lazy import to avoid hard dependency if RAG_DISABLED
         from importlib import import_module
 
-        provider = get_provider()
+        # Prefer OpenAI embeddings when available, even if Azure is configured
+        provider = "openai" if OPENAI_API_KEY else get_provider()
+        if provider not in {"azure", "openai"}:
+            provider = "openai" if OPENAI_API_KEY else "azure"
+
         if provider == "azure":
             # langchain-openai Azure embeddings
             AzureEmb = import_module("langchain_openai").AzureOpenAIEmbeddings
@@ -118,7 +122,13 @@ def rag_reindex(clear: bool = True) -> Dict[str, Any]:
 
     # Check if embedding model changed - if so, force clear to avoid dimension mismatch
     embedding_model_file = os.path.join(CHROMA_DIR, ".embedding_model")
-    current_model = AZURE_OPENAI_EMBEDDINGS_DEPLOYMENT or OPENAI_EMBEDDINGS_MODEL
+    # Keep model marker aligned with the provider preference (OpenAI first)
+    if OPENAI_API_KEY:
+        current_model = OPENAI_EMBEDDINGS_MODEL
+    elif AZURE_OPENAI_EMBEDDINGS_DEPLOYMENT:
+        current_model = AZURE_OPENAI_EMBEDDINGS_DEPLOYMENT
+    else:
+        current_model = OPENAI_EMBEDDINGS_MODEL
     force_clear = clear
     
     if os.path.exists(embedding_model_file) and not clear:

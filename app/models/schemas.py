@@ -49,9 +49,10 @@ For educational/strategy queries, give short, clear explanations directly."""
     reset: Optional[bool] = False
     stream: Optional[bool] = False  # Add streaming support
     # Preferred language/locale for responses (e.g., 'en', 'ja')
-
     locale: Optional[str] = "en"
     capabilities: Optional[List[str]] = None
+    # Whether to enable web search tools (perplexity_search, web_search, augmented_rag_search, etc.)
+    web_search_enabled: Optional[bool] = True
 
 class ChatResponse(BaseModel):
     content: str

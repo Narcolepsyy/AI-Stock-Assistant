@@ -68,6 +68,9 @@ const dict = {
     aiProviderFallback: 'AI',
     available: 'Available',
     unavailable: 'Unavailable',
+    // Web search settings
+    webSearchEnabled: 'Web Search',
+    webSearchEnabledDescription: 'Enable AI-powered web search for real-time information',
   },
   ja: {
     appTitle: 'AI株式アシスタント',
@@ -129,6 +132,9 @@ const dict = {
     aiProviderFallback: 'AI',
     available: '利用可能',
     unavailable: '利用不可',
+    // Web search settings
+    webSearchEnabled: 'ウェブ検索',
+    webSearchEnabledDescription: 'リアルタイム情報のためのAI駆動ウェブ検索を有効にする',
   },
 }
 

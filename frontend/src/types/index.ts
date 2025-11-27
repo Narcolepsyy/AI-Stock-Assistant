@@ -77,6 +77,7 @@ export interface AppSettings {
   systemPrompt: string
   deployment: string
   locale: 'en' | 'ja'
+  webSearchEnabled: boolean
 }
 
 // Form event types
